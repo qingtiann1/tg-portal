@@ -360,3 +360,120 @@ def save_forward_config():
 
     _save_config(cfg)
     return jsonify({"status": "ok", "config": cfg})
+
+
+# ============================================================
+# 新增：源群管理（添加/删除/启停监控）
+# ============================================================
+SRC_CFG_FILE = os.path.join(SESSIONS_DIR, "sources_config.json")
+
+def _load_sources():
+    if os.path.exists(SRC_CFG_FILE):
+        try:
+            with open(SRC_CFG_FILE) as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+def _save_sources(data):
+    with open(SRC_CFG_FILE, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@_flask_app.route("/get_sources")
+@login_required
+def get_sources():
+    return jsonify({"sources": _load_sources()})
+
+
+@_flask_app.route("/save_sources", methods=["POST"])
+@login_required
+def save_sources():
+    action = request.form.get("action", "")
+    name = request.form.get("name", "").strip()
+    src = request.form.get("source", "").strip()
+    method = request.form.get("method", "forward")
+    sources = _load_sources()
+
+    if action == "add" and name and src:
+        existing = [s for s in sources if s["name"] == name]
+        if existing:
+            return jsonify({"error": f"Group '{name}' already exists"}), 400
+        sources.append({
+            "name": name, "source": src, "method": method,
+            "enabled": True, "mode": "once", "complete": False,
+            "watch_interval_hours": 6,
+            "skip_photos": method == "upload",
+            "min_video_mb": _load_config().get("min_video_mb", 5),
+            "extra_skip_words": [],
+        })
+    elif action == "remove":
+        sources = [s for s in sources if s["name"] != name]
+    elif action == "toggle":
+        for s in sources:
+            if s["name"] == name:
+                s["enabled"] = not s.get("enabled", True)
+    elif action == "set_mode":
+        for s in sources:
+            if s["name"] == name:
+                mode = request.form.get("value", "once")
+                s["mode"] = mode
+                if mode == "watch":
+                    hours = request.form.get("interval", "6")
+                    s["watch_interval_hours"] = int(hours)
+    elif action == "set_method":
+        for s in sources:
+            if s["name"] == name:
+                s["method"] = request.form.get("value", method)
+
+    _save_sources(sources)
+    return jsonify({"status": "ok", "sources": sources})
+
+
+# ============================================================
+# Bot 通知配置
+# ============================================================
+BOT_CFG_FILE = os.path.join(SESSIONS_DIR, "bot_config.json")
+
+def _load_bot_cfg():
+    if os.path.exists(BOT_CFG_FILE):
+        try:
+            with open(BOT_CFG_FILE) as f:
+                return json.load(f)
+        except: pass
+    return {"token": "", "chat_id": "", "enabled": False, "daily_report_hour": 20}
+
+@_flask_app.route("/get_bot_config")
+@login_required
+def get_bot_config():
+    return jsonify(_load_bot_cfg())
+
+@_flask_app.route("/save_bot_config", methods=["POST"])
+@login_required
+def save_bot_config():
+    cfg = _load_bot_cfg()
+    for k in ["token", "chat_id"]:
+        if k in request.form and request.form[k]:
+            cfg[k] = request.form[k].strip()
+    cfg["enabled"] = request.form.get("enabled", "false") == "true"
+    h = request.form.get("daily_report_hour", "")
+    if h:
+        cfg["daily_report_hour"] = int(h)
+    with open(BOT_CFG_FILE, "w") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    return jsonify({"status": "ok"})
+
+@_flask_app.route("/test_bot", methods=["POST"])
+@login_required
+def test_bot():
+    cfg = _load_bot_cfg()
+    import urllib.request
+    try:
+        data = json.dumps({"chat_id": cfg["chat_id"], "text": "✅ TG Portal 通知测试成功！", "parse_mode": "HTML"}).encode()
+        req = urllib.request.Request(f"https://api.telegram.org/bot{cfg['token']}/sendMessage",
+                                     data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)[:200]})

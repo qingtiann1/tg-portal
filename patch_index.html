@@ -42,49 +42,79 @@
       <div class="layui-tab-item">
         <div class="forward-panel">
 
-          <!-- 过滤规则设置 -->
-          <fieldset class="layui-elem-field" style="margin-bottom:12px">
-            <legend style="font-size:13px;font-weight:700">过滤规则</legend>
-            <div class="layui-row" style="margin-bottom:8px">
-              <div class="layui-col-md2">
-                <label class="layui-form-label" style="width:auto;float:none;display:inline">最少秒数</label>
-                <input type="number" id="cfg_min_dur" class="layui-input" style="width:80px;display:inline" value="10" onchange="saveConfig()">
-              </div>
-              <div class="layui-col-md2">
-                <label class="layui-form-label" style="width:auto;float:none;display:inline">最小MB</label>
-                <input type="number" id="cfg_min_mb" class="layui-input" style="width:80px;display:inline" value="5" onchange="saveConfig()">
-              </div>
-              <div class="layui-col-md4">
-                <label class="layui-form-label" style="width:auto;float:none;display:inline">添加黑名单词</label>
-                <div class="layui-input-inline" style="width:160px"><input type="text" id="cfg_new_word" class="layui-input" placeholder="新词"></div>
-                <button class="layui-btn layui-btn-xs layui-btn-warm" onclick="addWord()">添加</button>
-                <button class="layui-btn layui-btn-xs" onclick="resetWords()">恢复默认</button>
-              </div>
-            </div>
-            <div id="skip_words_list" style="padding:4px 0;max-height:120px;overflow-y:auto"></div>
-          </fieldset>
-
-          <!-- 转发表单 -->
-          <div class="forward-stats" id="forward_stats"></div>
-          <form class="layui-form forward-form" onsubmit="return startForward()">
+          <!-- ① 一次性转存 -->
+          <fieldset class="layui-elem-field" style="margin-bottom:10px">
+            <legend style="font-size:13px;font-weight:700;color:#58a6ff">➕ 一次性转存</legend>
             <div class="layui-row">
-              <div class="layui-col-md6">
-                <input type="text" name="group_input" id="fwd_input" placeholder="群组链接/ID/消息链接 https://t.me/xxx" class="layui-input" required>
+              <div class="layui-col-md5">
+                <input type="text" id="once_input" placeholder="群链接/ID" class="layui-input">
               </div>
-              <div class="layui-col-md3" style="padding-left:8px">
-                <select name="method" id="fwd_method" class="layui-input">
-                  <option value="forward">可转发 (批量)</option>
+              <div class="layui-col-md3" style="padding-left:6px">
+                <select id="once_method" class="layui-input">
+                  <option value="forward">可转发(批量)</option>
                   <option value="upload">需下载上传</option>
                 </select>
               </div>
-              <div class="layui-col-md3" style="padding-left:8px">
-                <button type="submit" class="layui-btn layui-btn-normal" style="width:100%">开始转发</button>
+              <div class="layui-col-md2" style="padding-left:6px">
+                <button class="layui-btn layui-btn-sm layui-btn-normal" style="width:100%" onclick="addOnce()">开始转存</button>
               </div>
             </div>
-          </form>
-          <div class="forward-table">
-            <table class="layui-hide" id="forward_list" lay-filter="forward_list"></table>
+          </fieldset>
+
+          <!-- ② 持续监控 -->
+          <fieldset class="layui-elem-field" style="margin-bottom:10px">
+            <legend style="font-size:13px;font-weight:700;color:#3fb950">👁️ 持续监控</legend>
+            <div class="layui-row" style="margin-bottom:8px">
+              <div class="layui-col-md4"><input type="text" id="watch_input" placeholder="群链接/ID" class="layui-input"></div>
+              <div class="layui-col-md2" style="padding-left:6px">
+                <select id="watch_method" class="layui-input"><option value="forward">可转发</option><option value="upload">需上传</option></select>
+              </div>
+              <div class="layui-col-md2" style="padding-left:6px">
+                <select id="watch_interval" class="layui-input">
+                  <option value="1">1小时</option><option value="3">3小时</option>
+                  <option value="6" selected>6小时</option><option value="12">12小时</option><option value="24">24小时</option>
+                </select>
+              </div>
+              <div class="layui-col-md2" style="padding-left:6px">
+                <button class="layui-btn layui-btn-sm layui-btn-normal" style="width:100%" onclick="addWatch()">添加监控</button>
+              </div>
+            </div>
+            <table class="layui-hide" id="watch_list" lay-filter="watch_list"></table>
+          </fieldset>
+
+          <!-- ③ 过滤规则 + 通知 -->
+          <div class="layui-row" style="gap:10px">
+            <div class="layui-col-md6" style="padding-right:5px">
+              <fieldset class="layui-elem-field">
+                <legend style="font-size:13px;font-weight:700">⚙️ 过滤规则</legend>
+                <div style="margin-bottom:4px">
+                  <label style="font-size:11px">最少秒数:</label><input type="number" id="cfg_min_dur" style="width:60px;margin-right:8px" value="10" onchange="saveConfig()">
+                  <label style="font-size:11px">最小MB:</label><input type="number" id="cfg_min_mb" style="width:60px" value="5" onchange="saveConfig()">
+                </div>
+                <div style="margin-bottom:4px">
+                  <input type="text" id="cfg_new_word" placeholder="添加黑名单词" style="width:140px;display:inline;padding:2px 6px;border:1px solid #ccc;border-radius:3px;font-size:12px">
+                  <button class="layui-btn layui-btn-xs layui-btn-warm" onclick="addWord()">+</button>
+                  <button class="layui-btn layui-btn-xs" onclick="resetWords()">重置</button>
+                </div>
+                <div id="skip_words_list" style="max-height:100px;overflow-y:auto;font-size:11px"></div>
+              </fieldset>
+            </div>
+            <div class="layui-col-md6" style="padding-left:5px">
+              <fieldset class="layui-elem-field">
+                <legend style="font-size:13px;font-weight:700">📢 通知</legend>
+                <div style="margin-bottom:4px">
+                  <input type="text" id="bot_token" placeholder="Bot Token" style="width:100%;padding:2px 6px;border:1px solid #ccc;border-radius:3px;font-size:11px;margin-bottom:3px" onchange="saveBotConfig()">
+                  <input type="text" id="bot_chatid" placeholder="Chat ID" style="width:100%;padding:2px 6px;border:1px solid #ccc;border-radius:3px;font-size:11px;margin-bottom:3px" onchange="saveBotConfig()">
+                  <label style="font-size:11px"><input type="checkbox" id="bot_enabled" onchange="saveBotConfig()"> 启用每日报告</label>
+                  <button class="layui-btn layui-btn-xs" style="float:right" onclick="testBot()">测试</button>
+                </div>
+              </fieldset>
+            </div>
           </div>
+
+          <!-- 统计 -->
+          <div class="forward-stats" id="forward_stats"></div>
+          <table class="layui-hide" id="forward_list" lay-filter="forward_list"></table>
         </div>
       </div>
     </div>
@@ -162,55 +192,129 @@
       // Forward table
       table.render({
         elem: '#forward_list', data: [], title: 'forward_list',
-        height: 'full-260', limit: 1000, page: false,
+        height: 'full-300', limit: 1000, page: false,
         cols: [[
-          { field: 'name', title: 'Group', width: 150 },
-          { field: 'forwarded', title: 'Forwarded', width: 100 },
-          { field: 'skipped', title: 'Skipped', width: 80 },
-          { field: 'errors', title: 'Errors', width: 80 },
-          { field: 'progress', title: 'Progress', width: 120,
-            templet: function (d) {
-              var pct = d.progress || 0;
-              var ys = pct >= 100 ? 'layui-bg-green' : 'layui-bg-blue';
-              return '<div class="layui-progress layui-progress-big"><div class="layui-progress-bar ' + ys + '" lay-percent="' + pct + '%"></div></div>'
-            }},
-          { field: 'status', title: 'Status', width: 60,
-            templet: function (d) {
-              if (d.status === 'running') return '<span class="badge-yellow">RUN</span>';
-              if (d.status === 'done') return '<span class="badge-green">DONE</span>';
-              if (d.errors > 0) return '<span class="badge-red">ERR</span>';
+          { field: 'name', title: 'Group', width: 120 },
+          { field: 'forwarded', title: 'Fwd', width: 60 },
+          { field: 'skipped', title: 'Skip', width: 50 },
+          { field: 'errors', title: 'Err', width: 50 },
+          { field: 'status', title: 'Status', width: 70,
+            templet: function(d) {
+              if (d.status==='running') return '<span class="badge-yellow">RUN</span>';
+              if (d.status==='done'||d.complete) return '<span class="badge-green">DONE</span>';
               return '<span>-</span>';
             }}
-        ]], done: function () { element.render() }
+        ]], done: function() { element.render() }
       });
 
+      // Watch list table
+      table.render({
+        elem: '#watch_list', data: [], title: 'watch_list',
+        height: 'full-400', limit: 100, cols: [[
+          { field: 'name', title: 'Group', width: 120 },
+          { field: 'method', title: 'Mode', width: 70,
+            templet: function(d) { return d.method==='forward'?'批量':'下载上传'; }},
+          { field: 'watch_interval_hours', title: '间隔(h)', width: 60 },
+          { field: 'enabled', title: '状态', width: 60,
+            templet: function(d) { return d.enabled?'<span class="badge-green">ON</span>':'<span class="badge-red">OFF</span>'; }},
+          { field: 'ops', title: '操作', width: 120,
+            templet: function(d) {
+              return '<a href="#" onclick="toggleWatch(\''+d.name+'\')" style="color:#3fb950">启停</a> ' +
+                     '<a href="#" onclick="removeSource(\''+d.name+'\')" style="color:#f85149">删除</a> ' +
+                     '<a href="#" onclick="switchMode(\''+d.name+'\',\''+(d.mode||'once')+'\')" style="color:#58a6ff">'+(d.mode==='watch'?'→一次':'→监控')+'</a>';
+            }}
+        ]], done: function() { element.render() }
+      });
+
+      // === 一次性转存 ===
+      window.addOnce = function() {
+        var inp = $('#once_input').val().trim();
+        var method = $('#once_method').val();
+        if (!inp) { layer.msg('请输入群链接'); return; }
+        var name = inp.replace(/[^a-zA-Z0-9一-鿿]/g, '_').substring(0,20);
+        $.post('save_sources', {action:'add', name:name, source:inp, method:method}, function(r) {
+          if (r.error) { layer.msg(r.error); return; }
+          $.post('ctl_downloader', {action:'stop_fwd'}, function(){});
+          layer.msg('已添加: '+name+' (一次性转存)');
+          $('#once_input').val('');
+          loadSources();
+        });
+      };
+
+      // === 持续监控 ===
+      window.addWatch = function() {
+        var inp = $('#watch_input').val().trim();
+        var method = $('#watch_method').val();
+        var interval = $('#watch_interval').val();
+        if (!inp) { layer.msg('请输入群链接'); return; }
+        var name = inp.replace(/[^a-zA-Z0-9一-鿿]/g, '_').substring(0,20);
+        $.post('save_sources', {action:'add', name:'w_'+name, source:inp, method:method}, function(r) {
+          if (r.error) { layer.msg(r.error); return; }
+          $.post('save_sources', {action:'set_mode', name:'w_'+name, value:'watch', interval:interval}, function() {
+            $.post('ctl_downloader', {action:'stop_fwd'}, function(){});
+            layer.msg('已添加监控: w_'+name+' (每'+interval+'h)');
+            $('#watch_input').val('');
+            loadSources();
+          });
+        });
+      };
+
+      window.toggleWatch = function(name) {
+        $.post('save_sources', {action:'toggle', name:name}, function() { loadSources(); });
+      };
+      window.removeSource = function(name) {
+        layer.confirm('删除 '+name+'?', function() {
+          $.post('save_sources', {action:'remove', name:name}, function() { loadSources(); });
+        });
+      };
+      window.switchMode = function(name, curMode) {
+        var nm = curMode === 'watch' ? 'once' : 'watch';
+        var interval = nm==='watch' ? prompt('监控间隔(小时)?', '6') : '';
+        $.post('save_sources', {action:'set_mode', name:name, value:nm, interval:interval||'6'}, function() { loadSources(); });
+      };
+
+      function loadSources() {
+        $.get('get_sources', function(r) {
+          var watchItems = (r.sources||[]).filter(function(s) { return s.mode==='watch'; });
+          table.reload('watch_list', {data: watchItems});
+        });
+      }
+
+      // === 通知 ===
+      function loadBotConfig() {
+        $.get('get_bot_config', function(cfg) {
+          $('#bot_token').val(cfg.token||'');
+          $('#bot_chatid').val(cfg.chat_id||'');
+          $('#bot_enabled').prop('checked', cfg.enabled||false);
+        });
+      }
+      window.saveBotConfig = function() {
+        $.post('save_bot_config', {
+          token: $('#bot_token').val(), chat_id: $('#bot_chatid').val(),
+          enabled: $('#bot_enabled').prop('checked')
+        });
+      };
+      window.testBot = function() {
+        $.post('test_bot', function(r) {
+          layer.msg(r.status==='ok'?'测试成功!':'失败: '+(r.error||'?'));
+        });
+      };
+
+      // === 统计 ===
       function updateForwardStats() {
-        $.ajax({ url: "forward_status", type: "get", dataType: "json",
-          success: function (data) {
-            var stats = '';
-            stats += '<div class="forward-stat-card"><div class="val">' + (data.downloads_1h || 0) + '</div><div class="lbl">Downloads (1h)</div></div>';
-            stats += '<div class="forward-stat-card"><div class="val">' + (data.downloads_mb || 0) + ' MB</div><div class="lbl">Size (1h)</div></div>';
-            stats += '<div class="forward-stat-card"><div class="val">' + (data.dedup || 0) + '</div><div class="lbl">Dedup IDs</div></div>';
-            stats += '<div class="forward-stat-card"><div class="val">' + (data.groups ? data.groups.length : 0) + '</div><div class="lbl">Groups</div></div>';
-            $("#forward_stats").html(stats);
-
-            if (data.groups && data.groups.length > 0) {
-              table.reload('forward_list', { data: data.groups });
-            }
-
-            var hasRunning = false;
-            if (data.tasks) {
-              for (var tid in data.tasks) {
-                if (data.tasks[tid].status === 'running') hasRunning = true;
-              }
-            }
-            $("#forward_status_text").html(hasRunning ? 'running' : 'idle');
-            if (hasRunning) $("#forward_status_text").css('color', '#d2991d');
-            else $("#forward_status_text").css('color', 'black');
+        $.ajax({ url: \"forward_status\", type: \"get\", dataType: \"json\",
+          success: function(data) {
+            var stats = '<div class=\"forward-stat-card\"><div class=\"val\">'+(data.downloads_1h||0)+'</div><div class=\"lbl\">1h下载</div></div>';
+            stats += '<div class=\"forward-stat-card\"><div class=\"val\">'+(data.downloads_mb||0)+' MB</div><div class=\"lbl\">1h流量</div></div>';
+            stats += '<div class=\"forward-stat-card\"><div class=\"val\">'+(data.dedup||0)+'</div><div class=\"lbl\">去重ID</div></div>';
+            $('#forward_stats').html(stats);
+            if (data.groups && data.groups.length > 0) { table.reload('forward_list', {data: data.groups}); }
+            var hasRunning = data.tasks && Object.values(data.tasks).some(function(t){return t.status==='running';});
+            $('#forward_status_text').html(hasRunning?'running':'idle').css('color', hasRunning?'#d2991d':'black');
           }});
       }
 
-      // 配置管理
+      // === 过滤规则 ===
       function loadConfig() {
         $.ajax({ url: "get_forward_config", type: "get", dataType: "json",
           success: function(cfg) {

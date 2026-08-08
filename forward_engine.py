@@ -1,11 +1,11 @@
 """
-统一转发引擎 — 支持多源群，自动判断转发策略
-配置：修改 SOURCES 列表即可
+统一转发引擎 — 支持多源群，支持监控模式
 
 用法：
-  docker exec tg-login python /sessions/forward_engine.py          # 处理所有源群
-  docker exec tg-login python /sessions/forward_engine.py --dry    # 仅扫描不转发
-  docker exec tg-login python /sessions/forward_engine.py --group zuoai_caobi  # 指定群
+  docker exec tg-login python /sessions/forward_engine.py              # 处理所有启用的源群
+  docker exec tg-login python /sessions/forward_engine.py --dry        # 仅扫描不转发
+  docker exec tg-login python /sessions/forward_engine.py --watch     # 监控模式，定时检查新消息
+  docker exec tg-login python /sessions/forward_engine.py --group xxx  # 指定群
 """
 import asyncio
 import json
@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import tempfile
+import time as _time
 from pyrogram import Client
 
 # ============================================================
@@ -30,7 +31,9 @@ PROXY = {"scheme": "http", "hostname": PROXY_HOST, "port": PROXY_PORT}
 SDIR = "/app/sessions" if _os.path.isdir("/app/sessions") else "/sessions"
 SESSION = _os.path.join(SDIR, "media_downloader")
 DEDUP_FILE = _os.path.join(SDIR, "downloaded_ids.txt")
-FWD_LOG_FILE = _os.path.join(SDIR, "forwarded_log.json")  # 转发去重记录
+FWD_LOG_FILE = _os.path.join(SDIR, "forwarded_log.json")
+SRC_CFG_FILE = _os.path.join(SDIR, "sources_config.json")   # 源群配置（网页可编辑）
+DEFAULT_WATCH_INTERVAL_HOURS = 6  # 默认监控检查间隔（小时）
 
 MIN_DURATION = 10      # 视频最少秒数
 FW_BATCH = 10           # 批量转发每批条数
@@ -38,26 +41,27 @@ FW_DELAY = 10           # 批量间隔
 SINGLE_DELAY = 8        # 下载上传间隔
 
 # ============================================================
-# 源群列表 — 每个源群一个 dict
-#   name:      群组标识（用于日志和进度文件命名）
-#   source:    群组链接或 ID
-#   method:    "forward" = 直接批量转发（无限制）
-#              "upload"  = 下载→重上传（禁止转发的群）
-#   skip_photos: True = 不转发图片
-#   enabled:   False = 暂不处理
+# 源群配置 — 从 sources_config.json 加载（网页可管理）
+# 格式:
+# [{"name":"xxx", "source":"https://t.me/xxx", "method":"forward",
+#   "enabled":true, "watch":false, "watch_interval":30,
+#   "skip_photos":false, "min_video_mb":5, "extra_skip_words":[]}]
 # ============================================================
-SOURCES = [
-    # 示例配置。实际配置请通过 NAS 上的 forward_config.json 或环境变量设置
-    # {
-    #     "name": "example_group",
-    #     "source": "https://t.me/xxx",
-    #     "method": "forward",       # "forward" 或 "upload"
-    #     "skip_photos": False,
-    #     "enabled": True,
-    #     "min_video_mb": 5,
-    #     "extra_skip_words": [],
-    # },
-]
+def load_sources():
+    if _os.path.exists(SRC_CFG_FILE):
+        try:
+            with open(SRC_CFG_FILE) as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+
+def save_sources(sources):
+    with open(SRC_CFG_FILE, "w") as f:
+        json.dump(sources, f, ensure_ascii=False, indent=2)
+
+SOURCES = load_sources()
 
 # ============================================================
 # 垃圾过滤
@@ -622,8 +626,38 @@ async def upload_group(client, src, dst, cfg):
 # ============================================================
 # 主入口
 # ============================================================
+async def run_one_source(client, dst, cfg, dry=False):
+    """执行单个源群转发，完成后标记 complete"""
+    log(f"
+{'='*60}")
+    log(f"[{cfg['name']}] START method={cfg['method']} mode={cfg.get('mode','once')}")
+    log(f"{'='*60}")
+    try:
+        src = await client.get_chat(cfg["source"])
+        log(f"Source: {src.title} (id={src.id})")
+    except Exception as e:
+        log(f"Failed: {e}")
+        return
+    if dry:
+        log("[DRY RUN]")
+        return
+    if cfg["method"] == "forward":
+        await forward_batch(client, src, dst, cfg)
+    elif cfg["method"] == "upload":
+        await upload_group(client, src, dst, cfg)
+    if cfg.get("mode", "once") == "once":
+        srcs = load_sources()
+        for s in srcs:
+            if s["name"] == cfg["name"]:
+                s["complete"] = True
+        save_sources(srcs)
+        log(f"[{cfg['name']}] Marked complete.")
+
+
 async def main():
     dry_run = "--dry" in sys.argv
+    once_mode = "--once" in sys.argv
+    watch_mode = "--watch" in sys.argv
     target = None
     for a in sys.argv:
         if a.startswith("--group="):
@@ -636,37 +670,50 @@ async def main():
     dst = await client.get_chat(DEST)
     log(f"Dest: {dst.title}")
 
-    for cfg in SOURCES:
-        if not cfg.get("enabled", True):
-            log(f"\n[{cfg['name']}] DISABLED, skip")
-            continue
-        if target and cfg["name"] != target:
-            continue
+    sources = load_sources()
+    if not sources:
+        log("No sources. Add via web UI: http://nas:5000 -> Forward tab")
+        await client.stop()
+        return
 
-        log(f"\n{'='*60}")
-        log(f"[{cfg['name']}] START (method={cfg['method']})")
-        log(f"{'='*60}")
+    active = [s for s in sources if s.get("enabled") and (not target or s["name"] == target)]
+    if not active:
+        log("No enabled sources.")
+        await client.stop()
+        return
 
-        try:
-            src = await client.get_chat(cfg["source"])
-            log(f"Source: {src.title} (id={src.id})")
-        except Exception as e:
-            log(f"Failed to resolve source: {e}")
-            continue
+    if watch_mode:
+        watching = [s for s in active if s.get("mode") == "watch"]
+        if not watching:
+            log("No sources with mode='watch'.")
+            await client.stop()
+            return
+        for s in watching:
+            h = s.get("watch_interval_hours", DEFAULT_WATCH_INTERVAL_HOURS)
+            log(f"  Watching: {s['name']} every {h}h")
+        while True:
+            log(f"
+[Watch] Checking {len(watching)} groups...")
+            for cfg in watching:
+                await run_one_source(client, dst, cfg)
+            h = min(s.get("watch_interval_hours", DEFAULT_WATCH_INTERVAL_HOURS) for s in watching)
+            log(f"[Watch] Sleeping {h}h...")
+            await asyncio.sleep(h * 3600)
 
-        if dry_run:
-            log("[DRY RUN] Skip actual forwarding")
-            continue
+    elif once_mode or dry_run:
+        for cfg in active:
+            if cfg.get("complete") and not dry_run:
+                log(f"[{cfg['name']}] Already complete, skip.")
+                continue
+            await run_one_source(client, dst, cfg, dry=dry_run)
+        log("
+===== ONCE DONE =====")
 
-        if cfg["method"] == "forward":
-            await forward_batch(client, src, dst, cfg)
-        elif cfg["method"] == "upload":
-            await upload_group(client, src, dst, cfg)
-        else:
-            log(f"Unknown method: {cfg['method']}")
+    else:
+        for cfg in active:
+            await run_one_source(client, dst, cfg)
 
     await client.stop()
-    log("\n===== ALL DONE =====")
 
 
 if __name__ == "__main__":
