@@ -16,15 +16,17 @@ import tempfile
 from pyrogram import Client
 
 # ============================================================
-# 配置区 — 添加新群组在这里
+# 配置 — 通过环境变量传入，避免硬编码泄露
 # ============================================================
-API_ID = 30431350
-API_HASH = "dd31870e60686ad7b7fd01b2ac544259"
-DEST = -1004420616732  # TGdown
-PROXY = {"scheme": "http", "hostname": "mihomo", "port": 7890}
-
-# 自动适配路径
 import os as _os
+
+API_ID = int(_os.environ.get("TG_API_ID", "0"))
+API_HASH = _os.environ.get("TG_API_HASH", "")
+DEST = int(_os.environ.get("TG_DEST_GROUP", "0"))
+PROXY_HOST = _os.environ.get("TG_PROXY_HOST", "mihomo")
+PROXY_PORT = int(_os.environ.get("TG_PROXY_PORT", "7890"))
+PROXY = {"scheme": "http", "hostname": PROXY_HOST, "port": PROXY_PORT}
+
 SDIR = "/app/sessions" if _os.path.isdir("/app/sessions") else "/sessions"
 SESSION = _os.path.join(SDIR, "media_downloader")
 DEDUP_FILE = _os.path.join(SDIR, "downloaded_ids.txt")
@@ -44,20 +46,16 @@ SINGLE_DELAY = 8        # 下载上传间隔
 #   enabled:   False = 暂不处理
 # ============================================================
 SOURCES = [
-    {
-        "name": "zuoai_caobi",
-        "source": "zuoai_caobi",
-        "method": "forward",
-        "skip_photos": False,
-        "enabled": True,
-    },
-    {
-        "name": "old_source",
-        "source": -1003945743438,
-        "method": "upload",
-        "skip_photos": True,
-        "enabled": False,  # 已基本完成，等有新消息再开
-    },
+    # 示例配置。实际配置请通过 NAS 上的 forward_config.json 或环境变量设置
+    # {
+    #     "name": "example_group",
+    #     "source": "https://t.me/xxx",
+    #     "method": "forward",       # "forward" 或 "upload"
+    #     "skip_photos": False,
+    #     "enabled": True,
+    #     "min_video_mb": 5,
+    #     "extra_skip_words": [],
+    # },
 ]
 
 # ============================================================
