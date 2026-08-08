@@ -30,6 +30,7 @@ PROXY = {"scheme": "http", "hostname": PROXY_HOST, "port": PROXY_PORT}
 SDIR = "/app/sessions" if _os.path.isdir("/app/sessions") else "/sessions"
 SESSION = _os.path.join(SDIR, "media_downloader")
 DEDUP_FILE = _os.path.join(SDIR, "downloaded_ids.txt")
+FWD_LOG_FILE = _os.path.join(SDIR, "forwarded_log.json")  # 转发去重记录
 
 MIN_DURATION = 10      # 视频最少秒数
 FW_BATCH = 10           # 批量转发每批条数
@@ -72,6 +73,71 @@ URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
 def log(msg):
     print(msg, flush=True)
+
+
+# ============================================================
+# 去重：记录每个转发过的文件，防止不同群之间重复转发
+# ============================================================
+def load_forwarded_log():
+    if _os.path.exists(FWD_LOG_FILE):
+        try:
+            with open(FWD_LOG_FILE) as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+
+def save_forwarded_log(data):
+    with open(FWD_LOG_FILE, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_msg_fid(msg):
+    """获取消息的文件唯一ID（用于去重）"""
+    if msg.video and msg.video.file_unique_id:
+        return msg.video.file_unique_id
+    if msg.photo and msg.photo.file_unique_id:
+        return msg.photo.file_unique_id
+    if msg.document and msg.document.file_unique_id:
+        return msg.document.file_unique_id
+    return None
+
+
+def tgdown_msg_link(msg_id):
+    """根据 TGdown 群组 ID 生成消息链接"""
+    dest = abs(DEST)
+    dest_str = str(dest)
+    # 去掉 100 前缀得到纯 ID（-1004420616732 → 4420616732）
+    if dest_str.startswith("100"):
+        dest_str = dest_str[3:]
+    return f"https://t.me/c/{dest_str}/{msg_id}"
+
+
+def check_dup(fid):
+    """检查是否已在 TGdown 中转发过，返回 (is_dup, tgdown_msg_link)"""
+    fwd_log = load_forwarded_log()
+    if fid and fid in fwd_log:
+        orig = fwd_log[fid]
+        tg_link = orig.get("tgdown_link", "")
+        dup_from = orig.get("source", "?")
+        return True, f"[{dup_from}] {tg_link}"
+    return False, ""
+
+
+def record_forward(fid, msg_id, source_name):
+    """记录转发到 TGdown 的消息"""
+    if not fid:
+        return
+    fwd_log = load_forwarded_log()
+    tg_link = tgdown_msg_link(msg_id)
+    fwd_log[fid] = {
+        "source": source_name,
+        "tgdown_link": tg_link,
+        "msg_id": msg_id,
+        "time": _os.popen("date -Iseconds").read().strip() if _os.name != "nt" else "",
+    }
+    save_forwarded_log(fwd_log)
 
 
 def is_spam(msg):
@@ -162,21 +228,33 @@ async def forward_batch(client, src, dst, cfg):
     all_msgs.reverse()
 
     valid_ids = []
+    msg_fid_map = {}   # msg_id -> file_unique_id
     spam_stats = {}
+    dup_count = 0
+    src_link = f"https://t.me/{cfg['source']}" if isinstance(cfg.get("source"), str) and not str(cfg["source"]).startswith("-") else f"tg://group?id={cfg['source']}"
+
     for msg in all_msgs:
-        s, reason = is_spam(msg)
+        s, reason = is_spam(msg, cfg)
         if s:
             spam_stats[reason] = spam_stats.get(reason, 0) + 1
             continue
         if is_media(msg):
             caption = msg.caption or ""
             if has_url(caption):
-                # 进入 Phase 2 清洗队列，暂不算入批量转发
                 continue
+            # 去重检查
+            fid = get_msg_fid(msg)
+            if fid:
+                is_dup, dup_info = check_dup(fid)
+                if is_dup:
+                    dup_count += 1
+                    log(f"  [DUP] msg {msg.id}: {dup_info}")
+                    continue
+                msg_fid_map[msg.id] = fid
             valid_ids.append(msg.id)
 
     pending = [mid for mid in valid_ids if mid > last_id]
-    log(f"[{name}] Total:{len(all_msgs)} Spam:{sum(spam_stats.values())} Valid:{len(valid_ids)} Pending:{len(pending)}")
+    log(f"[{name}] Total:{len(all_msgs)} Spam:{sum(spam_stats.values())} Dup:{dup_count} Valid:{len(valid_ids)} Pending:{len(pending)}")
     for r, c in sorted(spam_stats.items(), key=lambda x: -x[1])[:8]:
         log(f"  {r}: {c}")
 
@@ -190,9 +268,15 @@ async def forward_batch(client, src, dst, cfg):
         batch = pending[i : i + FW_BATCH]
         log(f"[{name}] [{i+1}-{min(i+FW_BATCH, len(pending))}/{len(pending)}] {batch[:5]}...")
         try:
-            await client.forward_messages(dst.id, src.id, batch)
+            sent_msgs = await client.forward_messages(dst.id, src.id, batch)
             fwd += len(batch)
             last_id = batch[-1]
+            # 记录去重（写入 TGdown 消息链接）
+            if sent_msgs:
+                for sm in sent_msgs if isinstance(sent_msgs, list) else [sent_msgs]:
+                    src_mid = getattr(sm, "forward_from_message_id", 0)
+                    if src_mid and src_mid in msg_fid_map:
+                        record_forward(msg_fid_map[src_mid], sm.id, name)
             save()
             log(f"  OK ({fwd} total)")
         except Exception as e:
@@ -204,9 +288,14 @@ async def forward_batch(client, src, dst, cfg):
                 log(f"  FLOOD {wait}s (saved)...")
                 await asyncio.sleep(wait)
                 try:
-                    await client.forward_messages(dst.id, src.id, batch)
+                    sent_msgs = await client.forward_messages(dst.id, src.id, batch)
                     fwd += len(batch)
                     last_id = batch[-1]
+                    if sent_msgs:
+                        for sm in sent_msgs if isinstance(sent_msgs, list) else [sent_msgs]:
+                            src_mid = getattr(sm, "forward_from_message_id", 0)
+                            if src_mid and src_mid in msg_fid_map:
+                                record_forward(msg_fid_map[src_mid], sm.id, name)
                     save()
                     log(f"  Retry OK ({fwd} total)")
                 except Exception as e2:
@@ -296,11 +385,13 @@ async def upload_group(client, src, dst, cfg):
 
     items = []
     spam_stats = {}
+    dup_count = 0
+    src_link = f"https://t.me/{cfg['source']}" if isinstance(cfg.get("source"), str) and not str(cfg["source"]).startswith("-") else f"tg://group?id={cfg['source']}"
     last_cap_src = 0
     cap_seq = 0
 
     for i, msg in enumerate(all_msgs):
-        s, reason = is_spam(msg)
+        s, reason = is_spam(msg, cfg)
         if s:
             spam_stats[reason] = spam_stats.get(reason, 0) + 1
             continue
@@ -308,6 +399,15 @@ async def upload_group(client, src, dst, cfg):
             continue
         if skip_photos and msg.photo and not msg.video:
             continue
+
+        # 去重检查
+        fid = get_msg_fid(msg)
+        if fid:
+            is_dup, dup_info = check_dup(fid)
+            if is_dup:
+                dup_count += 1
+                log(f"  [DUP] msg {msg.id}: {dup_info}")
+                continue
 
         caption = msg.caption or ""
         if not caption and msg.video:
@@ -336,7 +436,7 @@ async def upload_group(client, src, dst, cfg):
         items.append((msg, clean_caption(caption)))
 
     pending = [(m, c) for m, c in items if m.id > last_id]
-    log(f"[{name}] Total:{len(all_msgs)} Spam:{sum(spam_stats.values())} Items:{len(items)} Pending:{len(pending)}")
+    log(f"[{name}] Total:{len(all_msgs)} Spam:{sum(spam_stats.values())} Dup:{dup_count} Items:{len(items)} Pending:{len(pending)}")
 
     if not pending:
         log(f"[{name}] All done!")
@@ -372,6 +472,8 @@ async def upload_group(client, src, dst, cfg):
                 fid = sent.video.file_unique_id if sent.video else sent.photo.file_unique_id
                 with open(DEDUP_FILE, "a") as f:
                     f.write(f"{fid}\n")
+                # 记录去重（TGdown 消息链接）
+                record_forward(fid, sent.id, name)
 
             fwd += 1
             last_id = msg.id
@@ -397,6 +499,7 @@ async def upload_group(client, src, dst, cfg):
                             if sent and sent.video:
                                 with open(DEDUP_FILE, "a") as f:
                                     f.write(f"{sent.video.file_unique_id}\n")
+                                record_forward(sent.video.file_unique_id, sent.id, name)
                             fwd += 1
                             last_id = msg.id
                             save()
