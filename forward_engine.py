@@ -94,7 +94,7 @@ def save_forwarded_log(data):
 
 
 def get_msg_fid(msg):
-    """获取消息的文件唯一ID（用于去重）"""
+    """获取消息的文件唯一ID"""
     if msg.video and msg.video.file_unique_id:
         return msg.video.file_unique_id
     if msg.photo and msg.photo.file_unique_id:
@@ -104,38 +104,67 @@ def get_msg_fid(msg):
     return None
 
 
+def get_msg_meta(msg):
+    """获取视频元数据（时长/分辨率/大小），用于相似度比较"""
+    if msg.video:
+        return {"duration": getattr(msg.video, "duration", 0) or 0,
+                "width": getattr(msg.video, "width", 0) or 0,
+                "height": getattr(msg.video, "height", 0) or 0,
+                "size": getattr(msg.video, "file_size", 0) or 0}
+    if msg.document and "video" in (getattr(msg.document, "mime_type", "") or ""):
+        return {"duration": getattr(msg.document, "duration", 0) or 0,
+                "width": 0, "height": 0,
+                "size": getattr(msg.document, "file_size", 0) or 0}
+    return None
+
+
 def tgdown_msg_link(msg_id):
-    """根据 TGdown 群组 ID 生成消息链接"""
-    dest = abs(DEST)
-    dest_str = str(dest)
-    # 去掉 100 前缀得到纯 ID（-1004420616732 → 4420616732）
+    dest_str = str(abs(DEST))
     if dest_str.startswith("100"):
         dest_str = dest_str[3:]
     return f"https://t.me/c/{dest_str}/{msg_id}"
 
 
-def check_dup(fid):
-    """检查是否已在 TGdown 中转发过，返回 (is_dup, tgdown_msg_link)"""
+def check_dup(fid, meta=None):
+    """
+    双层去重：
+    - hard: file_unique_id 完全相同 → 跳过
+    - soft: 时长相同(±3s)+分辨率相同 → 疑似同一视频，记录日志但继续
+    返回 (level, info)  level="" 表示不重复
+    """
+    if not fid:
+        return "", ""
     fwd_log = load_forwarded_log()
-    if fid and fid in fwd_log:
+
+    if fid in fwd_log:
         orig = fwd_log[fid]
-        tg_link = orig.get("tgdown_link", "")
-        dup_from = orig.get("source", "?")
-        return True, f"[{dup_from}] {tg_link}"
-    return False, ""
+        return "hard", f"[{orig.get('source','?')}] {orig.get('tgdown_link','')}"
+
+    if meta and meta.get("duration", 0) > 0:
+        dur = meta["duration"]
+        w = meta.get("width", 0)
+        h = meta.get("height", 0)
+        for efid, entry in fwd_log.items():
+            ed = entry.get("meta", {})
+            ed_dur = ed.get("duration", 0)
+            if ed_dur > 0 and abs(ed_dur - dur) <= 3:
+                if w > 0 and h > 0 and ed.get("width") == w and ed.get("height") == h:
+                    return "soft", f"疑似同视频({dur}s {w}x{h}) → [{entry.get('source','?')}] {entry.get('tgdown_link','')}"
+                return "soft", f"同长({dur}s)疑似重复 → [{entry.get('source','?')}] {entry.get('tgdown_link','')}"
+    return "", ""
 
 
-def record_forward(fid, msg_id, source_name):
-    """记录转发到 TGdown 的消息"""
+def record_forward(fid, msg_id, source_name, meta=None):
+    """记录转发到 TGdown，含元数据"""
     if not fid:
         return
     fwd_log = load_forwarded_log()
-    tg_link = tgdown_msg_link(msg_id)
     fwd_log[fid] = {
         "source": source_name,
-        "tgdown_link": tg_link,
+        "tgdown_link": tgdown_msg_link(msg_id),
         "msg_id": msg_id,
         "time": _os.popen("date -Iseconds").read().strip() if _os.name != "nt" else "",
+        "meta": meta or {},
     }
     save_forwarded_log(fwd_log)
 
@@ -228,7 +257,8 @@ async def forward_batch(client, src, dst, cfg):
     all_msgs.reverse()
 
     valid_ids = []
-    msg_fid_map = {}   # msg_id -> file_unique_id
+    msg_fid_map = {}    # msg_id -> file_unique_id
+    msg_meta_map = {}   # msg_id -> video metadata
     spam_stats = {}
     dup_count = 0
     src_link = f"https://t.me/{cfg['source']}" if isinstance(cfg.get("source"), str) and not str(cfg["source"]).startswith("-") else f"tg://group?id={cfg['source']}"
@@ -244,13 +274,19 @@ async def forward_batch(client, src, dst, cfg):
                 continue
             # 去重检查
             fid = get_msg_fid(msg)
+            meta = get_msg_meta(msg)
             if fid:
-                is_dup, dup_info = check_dup(fid)
-                if is_dup:
+                level, dup_info = check_dup(fid, meta)
+                if level == "hard":
                     dup_count += 1
                     log(f"  [DUP] msg {msg.id}: {dup_info}")
                     continue
+                if level == "soft":
+                    log(f"  [SIMILAR] msg {msg.id}: {dup_info}")
                 msg_fid_map[msg.id] = fid
+                meta = get_msg_meta(msg)
+                if meta:
+                    msg_meta_map[msg.id] = meta
             valid_ids.append(msg.id)
 
     pending = [mid for mid in valid_ids if mid > last_id]
@@ -276,7 +312,7 @@ async def forward_batch(client, src, dst, cfg):
                 for sm in sent_msgs if isinstance(sent_msgs, list) else [sent_msgs]:
                     src_mid = getattr(sm, "forward_from_message_id", 0)
                     if src_mid and src_mid in msg_fid_map:
-                        record_forward(msg_fid_map[src_mid], sm.id, name)
+                        record_forward(msg_fid_map[src_mid], sm.id, name, msg_meta_map.get(src_mid))
             save()
             log(f"  OK ({fwd} total)")
         except Exception as e:
@@ -295,7 +331,7 @@ async def forward_batch(client, src, dst, cfg):
                         for sm in sent_msgs if isinstance(sent_msgs, list) else [sent_msgs]:
                             src_mid = getattr(sm, "forward_from_message_id", 0)
                             if src_mid and src_mid in msg_fid_map:
-                                record_forward(msg_fid_map[src_mid], sm.id, name)
+                                record_forward(msg_fid_map[src_mid], sm.id, name, msg_meta_map.get(src_mid))
                     save()
                     log(f"  Retry OK ({fwd} total)")
                 except Exception as e2:
@@ -473,7 +509,7 @@ async def upload_group(client, src, dst, cfg):
                 with open(DEDUP_FILE, "a") as f:
                     f.write(f"{fid}\n")
                 # 记录去重（TGdown 消息链接）
-                record_forward(fid, sent.id, name)
+                record_forward(fid, sent.id, name, get_msg_meta(msg))
 
             fwd += 1
             last_id = msg.id
@@ -499,7 +535,7 @@ async def upload_group(client, src, dst, cfg):
                             if sent and sent.video:
                                 with open(DEDUP_FILE, "a") as f:
                                     f.write(f"{sent.video.file_unique_id}\n")
-                                record_forward(sent.video.file_unique_id, sent.id, name)
+                                record_forward(sent.video.file_unique_id, sent.id, name, get_msg_meta(fresh))
                             fwd += 1
                             last_id = msg.id
                             save()
