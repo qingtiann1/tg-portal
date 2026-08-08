@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TG Portal</title>
+  <link href="static/layui/css/layui.css" rel="stylesheet">
+  <link href="static/css/index.css" rel="stylesheet">
+  <style>
+    body { padding: 6px 16px; }
+    .forward-panel { padding: 12px 0; }
+    .forward-form .layui-input { margin-bottom: 8px; }
+    .forward-stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+    .forward-stat-card { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; padding: 10px 16px; min-width: 120px; text-align: center; }
+    .forward-stat-card .val { font-size: 20px; font-weight: 700; color: #0969da; }
+    .forward-stat-card .lbl { font-size: 11px; color: #656d76; margin-top: 2px; }
+    .forward-table { margin-top: 12px; }
+    .badge-green { color: #1a7f37; font-weight: 700; }
+    .badge-yellow { color: #bf8700; font-weight: 700; }
+    .badge-red { color: #cf222e; font-weight: 700; }
+  </style>
+</head>
+
+<body>
+  <div class="layui-tab" lay-filter="telegram_media_downloader">
+    <div class="header-title layui-tab-brief">
+      <ul class="layui-tab-title">
+        <li class="layui-this">Downloading</li>
+        <li>Downloaded</li>
+        <li>Forward</li>
+      </ul>
+      <div class="stop-btn" id="download_state" data-value="{{ download_state }}" onclick="download_state_change(this)"> {{ download_state }} </div>
+    </div>
+    <div class="layui-tab-content" style="padding: 0;">
+      <div class="layui-tab-item layui-show">
+        <table class="layui-hide" id="download_list" lay-filter="download_list"></table>
+      </div>
+      <div class="layui-tab-item">
+        <table class="layui-hide" id="already_download_list" lay-filter="already_download_list"></table>
+      </div>
+      <div class="layui-tab-item">
+        <div class="forward-panel">
+          <div class="forward-stats" id="forward_stats"></div>
+          <form class="layui-form forward-form" onsubmit="return startForward()">
+            <div class="layui-row">
+              <div class="layui-col-md6">
+                <input type="text" name="group_input" id="fwd_input" placeholder="群组链接/ID/消息链接 https://t.me/xxx" class="layui-input" required>
+              </div>
+              <div class="layui-col-md3" style="padding-left:8px">
+                <select name="method" id="fwd_method" class="layui-input">
+                  <option value="forward">可转发 (批量)</option>
+                  <option value="upload">需下载上传</option>
+                </select>
+              </div>
+              <div class="layui-col-md3" style="padding-left:8px">
+                <button type="submit" class="layui-btn layui-btn-normal" style="width:100%">开始转发</button>
+              </div>
+            </div>
+          </form>
+          <div class="forward-table">
+            <table class="layui-hide" id="forward_list" lay-filter="forward_list"></table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="layui-footer">
+    <div class="layui-row layui-col-space1">
+      <div class="layui-col-md2">
+        <p>TG Portal V <b id="app_version" style="color: #009688;">undefined</b>
+      </div>
+      <div class="layui-col-md7"></div>
+      <div class="layui-col-md3">
+        <div style="padding: 5px; float: right;">
+          <i class="layui-icon layui-icon-download-circle" style="font-size: 16px; color: #5FB878; font-weight: 700; margin-left: 15px;">
+            <i id="download_speed_title" style="color: black;"> 0.00 B/s </i>
+          </i>
+          <i class="layui-icon layui-icon-upload-circle" style="font-size: 16px; color: #1E9FFF; font-weight: 700; margin-left: 15px;">
+            <i id="forward_status_text" style="color: black;"> idle </i>
+          </i>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="static/layui/layui.js"></script>
+  <script>
+    layui.use(['table', 'element', 'form'], function () {
+      var table = layui.table;
+      var element = layui.element;
+      var layer = layui.layer;
+      var $ = layui.$;
+      var form = layui.form;
+      var already_download_list_data = new Array()
+      var download_list_table_data = new Array()
+      var forward_update_int = 0;
+
+      $.ajax({ url: "get_app_version", type: "get", async: false, dataType: "text",
+        success: function (result) { $("#app_version").html(result) }});
+
+      download_state_change = function(e) {
+        $.ajax({ url: "set_download_state?state=" + e.dataset.value, type: "post", async: false, dataType: "text",
+          success: function (result) { $("#download_state").html(result); e.dataset.value=result; }});
+      }
+
+      tableIns = table.render({
+        elem: '#download_list', data: download_list_table_data, title: 'download_list',
+        height: 'full-160', limit: 10000,
+        cols: [[
+          { field: 'chat', title: 'chat', width: 100 }, { field: 'id', title: 'id', width: 100 },
+          { field: 'filename', title: 'file name', align: 'center' },
+          { field: 'total_size', title: 'total byte', align: 'center' },
+          { field: 'download_progress', title: 'download progress', align: 'center',
+            templet: function (d) {
+              var ys = '';
+              if (30 < d.download_progress && d.download_progress < 100) ys = 'layui-bg-blue';
+              else if (0 < d.download_progress && d.download_progress <= 30) ys = 'layui-bg-red';
+              else if (100 == d.download_progress) ys = 'layui-bg-green';
+              return '<div class="layui-progress layui-progress-big" lay-showpercent="true" lay-filter="down-' + d.id + '"><div class="layui-progress-bar ' + ys + '" lay-percent="' + d.download_progress + '%"></div></div>'
+            }},
+          { field: 'download_speed', title: 'download speed', align: 'center' }
+        ]], done: function (res, currentCount) { element.render() }
+      });
+
+      table.render({
+        elem: '#already_download_list', data: already_download_list_data, title: 'already_download_list',
+        height: 'full-160', limit: 10000,
+        cols: [[
+          { field: 'id', title: 'id', width: 100 },
+          { field: 'filename', title: 'file name', align: 'center' },
+          { field: 'total_size', title: 'total size', align: 'center' },
+          { field: 'save_path', title: 'save path', align: 'center' }
+        ]], done: function (res, currentCount) { element.render() }
+      });
+
+      // Forward table
+      table.render({
+        elem: '#forward_list', data: [], title: 'forward_list',
+        height: 'full-260', limit: 1000, page: false,
+        cols: [[
+          { field: 'name', title: 'Group', width: 150 },
+          { field: 'forwarded', title: 'Forwarded', width: 100 },
+          { field: 'skipped', title: 'Skipped', width: 80 },
+          { field: 'errors', title: 'Errors', width: 80 },
+          { field: 'progress', title: 'Progress', width: 120,
+            templet: function (d) {
+              var pct = d.progress || 0;
+              var ys = pct >= 100 ? 'layui-bg-green' : 'layui-bg-blue';
+              return '<div class="layui-progress layui-progress-big"><div class="layui-progress-bar ' + ys + '" lay-percent="' + pct + '%"></div></div>'
+            }},
+          { field: 'status', title: 'Status', width: 60,
+            templet: function (d) {
+              if (d.status === 'running') return '<span class="badge-yellow">RUN</span>';
+              if (d.status === 'done') return '<span class="badge-green">DONE</span>';
+              if (d.errors > 0) return '<span class="badge-red">ERR</span>';
+              return '<span>-</span>';
+            }}
+        ]], done: function () { element.render() }
+      });
+
+      function updateForwardStats() {
+        $.ajax({ url: "forward_status", type: "get", dataType: "json",
+          success: function (data) {
+            var stats = '';
+            stats += '<div class="forward-stat-card"><div class="val">' + (data.downloads_1h || 0) + '</div><div class="lbl">Downloads (1h)</div></div>';
+            stats += '<div class="forward-stat-card"><div class="val">' + (data.downloads_mb || 0) + ' MB</div><div class="lbl">Size (1h)</div></div>';
+            stats += '<div class="forward-stat-card"><div class="val">' + (data.dedup || 0) + '</div><div class="lbl">Dedup IDs</div></div>';
+            stats += '<div class="forward-stat-card"><div class="val">' + (data.groups ? data.groups.length : 0) + '</div><div class="lbl">Groups</div></div>';
+            $("#forward_stats").html(stats);
+
+            if (data.groups && data.groups.length > 0) {
+              table.reload('forward_list', { data: data.groups });
+            }
+
+            var hasRunning = false;
+            if (data.tasks) {
+              for (var tid in data.tasks) {
+                if (data.tasks[tid].status === 'running') hasRunning = true;
+              }
+            }
+            $("#forward_status_text").html(hasRunning ? 'running' : 'idle');
+            if (hasRunning) $("#forward_status_text").css('color', '#d2991d');
+            else $("#forward_status_text").css('color', 'black');
+          }});
+      }
+
+      window.startForward = function () {
+        var input = $("#fwd_input").val().trim();
+        var method = $("#fwd_method").val();
+        if (!input) { layer.msg('Please enter group link'); return false; }
+        $.ajax({ url: "start_forward", type: "post", data: { group_input: input, method: method }, dataType: "json",
+          success: function (r) {
+            if (r.task_id) layer.msg('Started: ' + r.task_id);
+            else layer.msg('Error: ' + (r.error || 'unknown'));
+          }});
+        return false;
+      };
+
+      function update_download_list() {
+        $.ajax({ url: "get_download_list?already_down=false", type: "get", async: false, dataType: "json",
+          success: function (result) {
+            for (var j = 0, len2 = download_list_table_data.length; j < len2; j++) {
+              find_iter = false;
+              for (var i = 0, len = result.length; i < len; i++) {
+                if (result[i].chat == download_list_table_data[j].chat && result[i].id == download_list_table_data[j].id) {
+                  download_list_table_data[j].download_progress = result[i].download_progress;
+                  var progress = download_list_table_data[j].download_progress;
+                  element.progress('down-' + result[i].chat + '-' + result[i].id, progress + '%');
+                  var download_speed_obj = $('div[lay-filter="down_speed-' + result[i].chat + '-' + result[i].id + '"]');
+                  download_speed_obj.html(result[i].download_speed);
+                  if (progress == 100) {
+                    var device_obj = $('div[lay-filter="down-' + result[i].chat + '-' + result[i].id + '"] div');
+                    device_obj.removeClass("layui-bg-blue"); device_obj.addClass("layui-bg-green");
+                    obj = $('div[lay-id="download_list"]  tr[data-index="' + result[i].chat + '-' + result[i].id + '"]');
+                    obj.remove();
+                  }
+                  find_iter = true; break;
+                }
+              }
+            }
+            for (var i = 0, len = result.length; i < len; i++) {
+              find_iter = false;
+              for (var j = 0, len2 = download_list_table_data.length; j < len2; j++) {
+                if (result[i].chat == download_list_table_data[j].chat && result[i].id == download_list_table_data[j].id) { find_iter = true; break; }
+              }
+              if (find_iter || result[i].download_progress == 100) continue;
+              obj = $('div[lay-id="download_list"]  .layui-table-body .layui-table tbody');
+              var tr = ' <tr data-index="' + result[i].chat + '-' + result[i].id + '">' +
+                '<td><div class="layui-table-cell">' + result[i].chat + '</div></td>' +
+                '<td><div class="layui-table-cell">' + result[i].id + '</div></td>' +
+                '<td align="center"><div class="layui-table-cell">' + result[i].filename + '</div></td>' +
+                '<td align="center"><div class="layui-table-cell">' + result[i].total_size + '</div></td>' +
+                '<td align="center"><div class="layui-table-cell"><div class="layui-progress layui-progress-big" lay-showpercent="true" lay-filter="down-' + result[i].chat + '-' + result[i].id + '"><div class="layui-progress-bar layui-bg-blue" lay-percent="' + result[i].download_progress + '%"></div></div></div></td>' +
+                '<td align="center"><div class="layui-table-cell" lay-filter="down_speed-' + result[i].chat + '-' + result[i].id + '">' + result[i].download_speed + '</div></td></tr>';
+              obj.append(tr); download_list_table_data.push(result[i]);
+              if (download_list_table_data.length == 1) $(".layui-none").remove();
+              element.render();
+            }
+            element.render();
+          }});
+      }
+
+      function update_download_status() {
+        $.ajax({ url: "get_download_status", type: "get", async: false, dataType: "json",
+          success: function (result) { $("#download_speed_title").html(result.download_speed); }});
+      }
+
+      function update_already_download_list() {
+        $.ajax({ url: "get_download_list?already_down=true", type: "get", async: false, dataType: "json",
+          success: function (result) {
+            for (var i = 0, len = result.length; i < len; i++) {
+              if (result[i].download_progress != 100) continue;
+              find_iter = false;
+              for (var j = 0, len2 = already_download_list_data.length; j < len2; j++) {
+                if (result[i].chat == download_list_table_data[i].chat && result[i].id == already_download_list_data[j].id) { find_iter = true; break; }
+              }
+              if (find_iter) continue;
+              obj = $('div[lay-id="already_download_list"]  .layui-table-body .layui-table tbody');
+              var tr = ' <tr data-index="' + result[i].chat + '-' + result[i].id + '">' +
+                '<td><div class="layui-table-cell">' + result[i].id + '</div></td>' +
+                '<td align="center"><div class="layui-table-cell">' + result[i].filename + '</div></td>' +
+                '<td align="center"><div class="layui-table-cell">' + result[i].total_size + '</div></td>' +
+                '<td align="center"><div class="layui-table-cell">' + result[i].save_path + '</div></td></tr>';
+              obj.append(tr); already_download_list_data.push(result[i]);
+              if (already_download_list_data.length == 1) $(".layui-none").remove();
+              element.render();
+            }
+            element.render();
+          }});
+      }
+
+      var update_download_list_int = self.setInterval(update_download_list, 1000);
+      var update_download_status_int = self.setInterval(update_download_status, 1000);
+      var update_already_download_list_int = 0;
+
+      element.on('tab(telegram_media_downloader)', function (data) {
+        if (data.index != 0) { clearInterval(update_download_list_int); }
+        if (data.index == 0) { update_download_list_int = self.setInterval(update_download_list, 1000); }
+        if (data.index != 1) { clearInterval(update_already_download_list_int); }
+        if (data.index == 1) { update_already_download_list_int = self.setInterval(update_already_download_list, 1000); }
+        if (data.index != 2) { clearInterval(forward_update_int); }
+        if (data.index == 2) {
+          updateForwardStats();
+          forward_update_int = self.setInterval(updateForwardStats, 5000);
+        }
+      });
+
+      form.render();
+    });
+  </script>
+</body>
+</html>
