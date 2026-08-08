@@ -41,6 +41,30 @@
       </div>
       <div class="layui-tab-item">
         <div class="forward-panel">
+
+          <!-- 过滤规则设置 -->
+          <fieldset class="layui-elem-field" style="margin-bottom:12px">
+            <legend style="font-size:13px;font-weight:700">过滤规则</legend>
+            <div class="layui-row" style="margin-bottom:8px">
+              <div class="layui-col-md2">
+                <label class="layui-form-label" style="width:auto;float:none;display:inline">最少秒数</label>
+                <input type="number" id="cfg_min_dur" class="layui-input" style="width:80px;display:inline" value="10" onchange="saveConfig()">
+              </div>
+              <div class="layui-col-md2">
+                <label class="layui-form-label" style="width:auto;float:none;display:inline">最小MB</label>
+                <input type="number" id="cfg_min_mb" class="layui-input" style="width:80px;display:inline" value="5" onchange="saveConfig()">
+              </div>
+              <div class="layui-col-md4">
+                <label class="layui-form-label" style="width:auto;float:none;display:inline">添加黑名单词</label>
+                <div class="layui-input-inline" style="width:160px"><input type="text" id="cfg_new_word" class="layui-input" placeholder="新词"></div>
+                <button class="layui-btn layui-btn-xs layui-btn-warm" onclick="addWord()">添加</button>
+                <button class="layui-btn layui-btn-xs" onclick="resetWords()">恢复默认</button>
+              </div>
+            </div>
+            <div id="skip_words_list" style="padding:4px 0;max-height:120px;overflow-y:auto"></div>
+          </fieldset>
+
+          <!-- 转发表单 -->
           <div class="forward-stats" id="forward_stats"></div>
           <form class="layui-form forward-form" onsubmit="return startForward()">
             <div class="layui-row">
@@ -186,6 +210,55 @@
           }});
       }
 
+      // 配置管理
+      function loadConfig() {
+        $.ajax({ url: "get_forward_config", type: "get", dataType: "json",
+          success: function(cfg) {
+            $("#cfg_min_dur").val(cfg.min_duration || 10);
+            $("#cfg_min_mb").val(cfg.min_video_mb || 5);
+            var words = cfg.skip_words || [];
+            var html = '';
+            for (var i = 0; i < words.length; i++) {
+              html += '<span style="display:inline-block;margin:2px;padding:2px 8px;background:#e8f0fe;border-radius:10px;font-size:12px">' + words[i] + ' <a href="javascript:void(0)" onclick="removeWord(\'' + words[i] + '\')" style="color:#cf222e;text-decoration:none">x</a></span>';
+            }
+            $("#skip_words_list").html(html || '<span style="color:#888">暂无黑名单词</span>');
+          }});
+      }
+
+      window.saveConfig = function() {
+        var dur = $("#cfg_min_dur").val();
+        var mb = $("#cfg_min_mb").val();
+        $.post("save_forward_config", { min_duration: dur, min_video_mb: mb }, function() {
+          layer.msg('Saved');
+        });
+      };
+
+      window.addWord = function() {
+        var word = $("#cfg_new_word").val().trim();
+        if (!word) return;
+        $.post("save_forward_config", { action: "add", word: word }, function() {
+          $("#cfg_new_word").val('');
+          loadConfig();
+          layer.msg('Added: ' + word);
+        });
+      };
+
+      window.removeWord = function(word) {
+        $.post("save_forward_config", { action: "remove", word: word }, function() {
+          loadConfig();
+          layer.msg('Removed: ' + word);
+        });
+      };
+
+      window.resetWords = function() {
+        layer.confirm('恢复默认黑名单词？', function() {
+          $.post("save_forward_config", { action: "reset" }, function() {
+            loadConfig();
+            layer.msg('Reset to defaults');
+          });
+        });
+      };
+
       window.startForward = function () {
         var input = $("#fwd_input").val().trim();
         var method = $("#fwd_method").val();
@@ -283,6 +356,7 @@
         if (data.index != 2) { clearInterval(forward_update_int); }
         if (data.index == 2) {
           updateForwardStats();
+          loadConfig();
           forward_update_int = self.setInterval(updateForwardStats, 5000);
         }
       });

@@ -44,7 +44,18 @@ deAesCrypt = AesBase64("1234123412ABCDEF", "ABCDEF1234123412")
 
 SESSIONS_DIR = "/app/sessions"
 ENGINE_SCRIPT = os.path.join(SESSIONS_DIR, "forward_engine.py")
+CONFIG_FILE = os.path.join(SESSIONS_DIR, "forward_config.json")
 DEDUP_FILE = os.path.join(SESSIONS_DIR, "downloaded_ids.txt")
+
+# 默认黑名单词
+DEFAULT_SKIP_WORDS = [
+    "一键清理", "清理僵尸粉", "僵尸粉", "清除", "清粉",
+    "加群", "进群", "群号", "复制群", "打开群", "频道链接",
+    "免费约", "同城约", "私聊", "一对一", "1v1", "1对1",
+    "扫码", "关注公众号", "成人站",
+    "看片", "免费看", "裸聊", "同城", "交友约",
+    "兼职", "赚钱", "日结", "招人",
+]
 
 # 运行中的转发任务
 _running_tasks = {}
@@ -292,3 +303,60 @@ def ctl_downloader():
         subprocess.Popen(cmds[action])
         return jsonify({"status": "ok"})
     return jsonify({"error": "invalid action"}), 400
+
+
+# ============================================================
+# 新增：配置管理（黑名单词库 + 大小阈值）
+# ============================================================
+def _load_config():
+    """加载转发配置"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE) as f:
+                return json.load(f)
+        except:
+            pass
+    return {"min_duration": 10, "min_video_mb": 5, "skip_words": DEFAULT_SKIP_WORDS}
+
+
+def _save_config(cfg):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+@_flask_app.route("/get_forward_config")
+@login_required
+def get_forward_config():
+    """获取转发配置（黑名单词库 + 参数）"""
+    cfg = _load_config()
+    if "default_words" not in cfg:
+        cfg["default_words"] = DEFAULT_SKIP_WORDS
+    return jsonify(cfg)
+
+
+@_flask_app.route("/save_forward_config", methods=["POST"])
+@login_required
+def save_forward_config():
+    """保存转发配置"""
+    cfg = _load_config()
+
+    # 更新参数
+    if "min_duration" in request.form:
+        cfg["min_duration"] = int(request.form["min_duration"])
+    if "min_video_mb" in request.form:
+        cfg["min_video_mb"] = int(request.form["min_video_mb"])
+
+    # 更新词库
+    action = request.form.get("action", "")
+    word = request.form.get("word", "").strip()
+
+    if action == "add" and word:
+        if word not in cfg.setdefault("skip_words", []):
+            cfg["skip_words"].append(word)
+    elif action == "remove" and word:
+        cfg["skip_words"] = [w for w in cfg.get("skip_words", []) if w != word]
+    elif action == "reset":
+        cfg["skip_words"] = list(DEFAULT_SKIP_WORDS)
+
+    _save_config(cfg)
+    return jsonify({"status": "ok", "config": cfg})
