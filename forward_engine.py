@@ -128,8 +128,8 @@ def tgdown_msg_link(msg_id):
 def check_dup(fid, meta=None):
     """
     双层去重：
-    - hard: file_unique_id 完全相同 → 跳过
-    - soft: 时长相同(±3s)+分辨率相同 → 疑似同一视频，记录日志但继续
+    - hard: file_unique_id 完全相同 → 直接跳过
+    - soft: 时长相同(±3s)+分辨率相同 → 返回疑似链接，继续转发但标题加注
     返回 (level, info)  level="" 表示不重复
     """
     if not fid:
@@ -138,7 +138,7 @@ def check_dup(fid, meta=None):
 
     if fid in fwd_log:
         orig = fwd_log[fid]
-        return "hard", f"[{orig.get('source','?')}] {orig.get('tgdown_link','')}"
+        return "hard", orig.get("tgdown_link", "")
 
     if meta and meta.get("duration", 0) > 0:
         dur = meta["duration"]
@@ -147,11 +147,15 @@ def check_dup(fid, meta=None):
         for efid, entry in fwd_log.items():
             ed = entry.get("meta", {})
             ed_dur = ed.get("duration", 0)
-            if ed_dur > 0 and abs(ed_dur - dur) <= 3:
-                if w > 0 and h > 0 and ed.get("width") == w and ed.get("height") == h:
-                    return "soft", f"疑似同视频({dur}s {w}x{h}) → [{entry.get('source','?')}] {entry.get('tgdown_link','')}"
-                return "soft", f"同长({dur}s)疑似重复 → [{entry.get('source','?')}] {entry.get('tgdown_link','')}"
+            # 时长差 ≤1 秒 + 分辨率一致才算
+            if ed_dur > 0 and abs(ed_dur - dur) <= 1 and ed.get("width") == w and ed.get("height") == h and w > 0:
+                return "soft", entry.get("tgdown_link", "")
     return "", ""
+
+
+def soft_dup_note(link):
+    """生成软去重的标题标注"""
+    return f"\n\n⚠️ 疑似重复: {link}"
 
 
 def record_forward(fid, msg_id, source_name, meta=None):
@@ -257,10 +261,12 @@ async def forward_batch(client, src, dst, cfg):
     all_msgs.reverse()
 
     valid_ids = []
-    msg_fid_map = {}    # msg_id -> file_unique_id
-    msg_meta_map = {}   # msg_id -> video metadata
+    soft_dupes = []      # [(msg, caption, dup_link)] 软去重→单独发送加标注
+    msg_fid_map = {}     # msg_id -> file_unique_id
+    msg_meta_map = {}    # msg_id -> video metadata
     spam_stats = {}
     dup_count = 0
+    soft_count = 0
     src_link = f"https://t.me/{cfg['source']}" if isinstance(cfg.get("source"), str) and not str(cfg["source"]).startswith("-") else f"tg://group?id={cfg['source']}"
 
     for msg in all_msgs:
@@ -282,15 +288,20 @@ async def forward_batch(client, src, dst, cfg):
                     log(f"  [DUP] msg {msg.id}: {dup_info}")
                     continue
                 if level == "soft":
+                    soft_count += 1
                     log(f"  [SIMILAR] msg {msg.id}: {dup_info}")
+                    soft_dupes.append((msg, caption, dup_info))
+                    msg_fid_map[msg.id] = fid
+                    if meta:
+                        msg_meta_map[msg.id] = meta
+                    continue  # 不进批量，稍后用 file_id 单发加标注
                 msg_fid_map[msg.id] = fid
-                meta = get_msg_meta(msg)
                 if meta:
                     msg_meta_map[msg.id] = meta
             valid_ids.append(msg.id)
 
     pending = [mid for mid in valid_ids if mid > last_id]
-    log(f"[{name}] Total:{len(all_msgs)} Spam:{sum(spam_stats.values())} Dup:{dup_count} Valid:{len(valid_ids)} Pending:{len(pending)}")
+    log(f"[{name}] Total:{len(all_msgs)} Spam:{sum(spam_stats.values())} Dup:{dup_count} Soft:{soft_count} Valid:{len(valid_ids)} Pending:{len(pending)}")
     for r, c in sorted(spam_stats.items(), key=lambda x: -x[1])[:8]:
         log(f"  {r}: {c}")
 
@@ -387,6 +398,49 @@ async def forward_batch(client, src, dst, cfg):
                     err += 1
             await asyncio.sleep(SINGLE_DELAY)
 
+    # Phase 3: 软去重 — 用 file_id 发送 + 标题加疑似重复链接
+    if soft_dupes:
+        pending_soft = [(m, c, l) for m, c, l in soft_dupes if m.id > last_id]
+        if pending_soft:
+            log(f"[{name}] Phase 3: soft-dupes {len(pending_soft)} (send with warning)...")
+            for i, (msg, cap, link) in enumerate(pending_soft):
+                warn_cap = (cap or msg.caption or "") + f"\n\n⚠️ 疑似重复: {link}"
+                log(f"  [{i+1}/{len(pending_soft)}] msg {msg.id}: {warn_cap[:80]}")
+                try:
+                    fresh = await client.get_messages(src.id, msg.id)
+                    if not fresh:
+                        skp += 1
+                        continue
+                    if fresh.video:
+                        v = fresh.video
+                        sent = await client.send_video(dst.id, v.file_id, caption=warn_cap,
+                                                        width=v.width, height=v.height, duration=v.duration)
+                    elif fresh.photo:
+                        sent = await client.send_photo(dst.id, fresh.photo.file_id, caption=warn_cap)
+                    elif fresh.document:
+                        sent = await client.send_document(dst.id, fresh.document.file_id, caption=warn_cap)
+                    else:
+                        skp += 1
+                        continue
+                    if sent:
+                        fid = get_msg_fid(fresh) or (sent.video.file_unique_id if sent.video else (sent.photo.file_unique_id if sent.photo else None))
+                        if fid:
+                            record_forward(fid, sent.id, name, get_msg_meta(fresh))
+                    fwd += 1
+                    last_id = msg.id
+                    save()
+                    log(f"  OK")
+                except Exception as e:
+                    err_str = str(e)
+                    if "FLOOD" in err_str.upper():
+                        m = re.search(r"wait of (\d+) seconds", err_str)
+                        wait = int(m.group(1)) + 5 if m else 65
+                        save()
+                        await asyncio.sleep(wait)
+                    else:
+                        err += 1
+                await asyncio.sleep(SINGLE_DELAY)
+
     if os.path.exists(pf):
         os.remove(pf)
     log(f"[{name}] DONE: fwd={fwd} skip={skp} err={err}")
@@ -422,6 +476,7 @@ async def upload_group(client, src, dst, cfg):
     items = []
     spam_stats = {}
     dup_count = 0
+    soft_count = 0
     src_link = f"https://t.me/{cfg['source']}" if isinstance(cfg.get("source"), str) and not str(cfg["source"]).startswith("-") else f"tg://group?id={cfg['source']}"
     last_cap_src = 0
     cap_seq = 0
@@ -438,12 +493,18 @@ async def upload_group(client, src, dst, cfg):
 
         # 去重检查
         fid = get_msg_fid(msg)
+        meta = get_msg_meta(msg)
+        dup_note = ""
         if fid:
-            is_dup, dup_info = check_dup(fid)
-            if is_dup:
+            level, link = check_dup(fid, meta)
+            if level == "hard":
                 dup_count += 1
-                log(f"  [DUP] msg {msg.id}: {dup_info}")
+                log(f"  [DUP] msg {msg.id}: {link}")
                 continue
+            if level == "soft":
+                soft_count += 1
+                log(f"  [SIMILAR] msg {msg.id}: {link}")
+                dup_note = f"\n\n⚠️ 疑似重复: {link}"
 
         caption = msg.caption or ""
         if not caption and msg.video:
@@ -469,10 +530,10 @@ async def upload_group(client, src, dst, cfg):
                         caption = f"{caption} {cap_seq + 1}"
                     break
 
-        items.append((msg, clean_caption(caption)))
+        items.append((msg, clean_caption(caption + dup_note)))
 
     pending = [(m, c) for m, c in items if m.id > last_id]
-    log(f"[{name}] Total:{len(all_msgs)} Spam:{sum(spam_stats.values())} Dup:{dup_count} Items:{len(items)} Pending:{len(pending)}")
+    log(f"[{name}] Total:{len(all_msgs)} Spam:{sum(spam_stats.values())} Dup:{dup_count} Soft:{soft_count} Items:{len(items)} Pending:{len(pending)}")
 
     if not pending:
         log(f"[{name}] All done!")
