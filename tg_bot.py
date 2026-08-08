@@ -69,6 +69,10 @@ def api(method, data=None):
         return None
 
 
+def send_chat_action(chat_id, action="typing"):
+    return api("sendChatAction", {"chat_id": chat_id, "action": action})
+
+
 def send_message(chat_id, text, reply_markup=None):
     data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup:
@@ -342,6 +346,9 @@ def process_message(msg):
     text = msg.get("text", "").strip()
     if not text:
         return
+
+    # 立即显示"已看到，处理中"
+    send_chat_action(chat_id, "typing")
 
     # 命令
     if text.startswith("/start") or text.startswith("/help"):
