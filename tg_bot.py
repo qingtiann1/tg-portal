@@ -17,6 +17,7 @@ SDIR = "/sessions" if os.path.isdir("/sessions") else "/app/sessions"
 BOT_CFG = os.path.join(SDIR, "bot_config.json")
 SRC_CFG = os.path.join(SDIR, "sources_config.json")
 STATE_FILE = os.path.join(SDIR, "bot_state.json")
+OFFSET_FILE = os.path.join(SDIR, "bot_offset.txt")
 
 TG_API = "https://api.telegram.org/bot"
 
@@ -40,16 +41,12 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _get_proxy():
-    """获取代理设置"""
-    for env in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]:
-        val = os.environ.get(env, "")
-        if val:
-            return val
-    return os.environ.get("TG_PROXY", "http://mihomo:7890")
+# 在模块加载时设置代理（环境变量方式，不冲突）
+if not os.environ.get("HTTPS_PROXY"):
+    os.environ["HTTPS_PROXY"] = "http://mihomo:7890"
 
 
-def api(method, data=None, timeout=30):
+def api(method, data=None, timeout=20):
     """调用 Telegram Bot API"""
     cfg = load_json(BOT_CFG)
     token = cfg.get("token", "")
@@ -59,18 +56,11 @@ def api(method, data=None, timeout=30):
         url = f"{TG_API}{token}/{method}"
         body = json.dumps(data).encode() if data else None
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-        proxy = _get_proxy()
-        if proxy:
-            req.set_proxy(proxy, "https")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        # 400/409 等是正常的（如 offset 过期），不打印错误
-        if e.code not in (400, 409):
-            log(f"API HTTP {e.code}")
-        return None
     except Exception as e:
-        log(f"API error: {e}")
+        if "400" not in str(e) and "409" not in str(e):
+            log(f"API error: {e}")
         return None
 
 
@@ -440,16 +430,28 @@ def main():
         log("Bot token not configured. Set in web UI: Forward -> 通知")
         return
 
-    log(f"Bot started. Polling...")
-    offset = 0
+    # 加载上次 offset，避免重复处理旧消息
+    try:
+        with open(OFFSET_FILE) as f:
+            offset = int(f.read().strip())
+    except:
+        offset = 0
+    log(f"Bot started. Polling from offset={offset}...")
 
     while True:
         try:
-            result = api("getUpdates", {"offset": offset, "timeout": 10}, timeout=25)
-            if result and result.get("ok") and result["result"]:
-                for update in result["result"]:
-                    offset = update["update_id"] + 1
+            params = {"offset": offset, "limit": 10}
+            result = api("getUpdates", params, timeout=20)
+            if result and result.get("ok"):
+                for update in result.get("result", []):
                     process_update(update)
+                    offset = update["update_id"] + 1
+                if result.get("result"):
+                    with open(OFFSET_FILE, "w") as f:
+                        f.write(str(offset))
+            else:
+                log(f"Poll returned: {result}")
+            time.sleep(3)
         except KeyboardInterrupt:
             break
         except Exception as e:
