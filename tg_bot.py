@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""
+TG Portal Bot — 交互式群组转发管理
+用法: python tg_bot.py
+通过 Bot API 轮询，无需 Pyrogram session
+
+部署: docker exec -d tg-login python /sessions/tg_bot.py
+"""
+import json
+import os
+import re
+import sys
+import time
+import urllib.request
+
+SDIR = "/sessions" if os.path.isdir("/sessions") else "/app/sessions"
+BOT_CFG = os.path.join(SDIR, "bot_config.json")
+SRC_CFG = os.path.join(SDIR, "sources_config.json")
+STATE_FILE = os.path.join(SDIR, "bot_state.json")
+
+TG_API = "https://api.telegram.org/bot"
+
+
+def log(msg):
+    print(f"[Bot] {msg}", flush=True)
+
+
+def load_json(path, default=None):
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except:
+            pass
+    return default or {}
+
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _get_proxy():
+    """获取代理设置"""
+    for env in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]:
+        val = os.environ.get(env, "")
+        if val:
+            return val
+    return os.environ.get("TG_PROXY", "http://mihomo:7890")
+
+
+def api(method, data=None):
+    """调用 Telegram Bot API"""
+    cfg = load_json(BOT_CFG)
+    token = cfg.get("token", "")
+    if not token:
+        return None
+    try:
+        url = f"{TG_API}{token}/{method}"
+        body = json.dumps(data).encode() if data else None
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        proxy = _get_proxy()
+        if proxy:
+            req.set_proxy(proxy, "https")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        log(f"API error: {e}")
+        return None
+
+
+def send_message(chat_id, text, reply_markup=None):
+    data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup:
+        data["reply_markup"] = reply_markup
+    return api("sendMessage", data)
+
+
+def edit_message(chat_id, msg_id, text, reply_markup=None):
+    data = {"chat_id": chat_id, "message_id": msg_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup:
+        data["reply_markup"] = reply_markup
+    return api("editMessageText", data)
+
+
+def answer_callback(callback_id, text=""):
+    return api("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
+
+
+# ============================================================
+# 链接解析
+# ============================================================
+def parse_link(text):
+    """解析消息中的链接，返回 (type, identifier)"""
+    # 消息链接: https://t.me/xxx/123 或 https://t.me/c/xxx/123
+    m = re.search(r"(?:https?://)?t(?:elegram)?\.me/(c/)?([^/\s]+)/(\d+)", text)
+    if m:
+        prefix = "c/" if m.group(1) else ""
+        chat = f"{prefix}{m.group(2)}"
+        msg_id = int(m.group(3))
+        return "message", (chat, msg_id)
+
+    # 群组链接: https://t.me/xxx 或 @xxx
+    m = re.search(r"(?:https?://)?t(?:elegram)?\.me/([^/\s]+)", text)
+    if m:
+        return "group", m.group(1)
+
+    # 纯数字 ID
+    m = re.search(r"(-?\d{10,})", text)
+    if m:
+        return "group", m.group(1)
+
+    return None, None
+
+
+# ============================================================
+# 会话状态管理
+# ============================================================
+def get_state(chat_id):
+    states = load_json(STATE_FILE, {})
+    return states.get(str(chat_id), {})
+
+
+def set_state(chat_id, key, value):
+    states = load_json(STATE_FILE, {})
+    cid = str(chat_id)
+    if cid not in states:
+        states[cid] = {}
+    states[cid][key] = value
+    save_json(STATE_FILE, states)
+
+
+def clear_state(chat_id):
+    states = load_json(STATE_FILE, {})
+    states.pop(str(chat_id), None)
+    save_json(STATE_FILE, states)
+
+
+# ============================================================
+# 键盘
+# ============================================================
+def keyboard(buttons):
+    return {"inline_keyboard": buttons}
+
+
+METHOD_KB = keyboard([
+    [{"text": "🔄 可转存（批量）", "callback_data": "method:forward"},
+     {"text": "⬇️ 需下载上传", "callback_data": "method:upload"}],
+    [{"text": "❌ 取消", "callback_data": "cancel"}],
+])
+
+MODE_KB = keyboard([
+    [{"text": "📦 一次性转存", "callback_data": "mode:once"},
+     {"text": "👁️ 持续监控", "callback_data": "mode:watch"}],
+    [{"text": "❌ 取消", "callback_data": "cancel"}],
+])
+
+INTERVAL_KB = keyboard([
+    [{"text": "1小时", "callback_data": "interval:1"},
+     {"text": "3小时", "callback_data": "interval:3"},
+     {"text": "6小时", "callback_data": "interval:6"}],
+    [{"text": "12小时", "callback_data": "interval:12"},
+     {"text": "24小时", "callback_data": "interval:24"}],
+    [{"text": "❌ 取消", "callback_data": "cancel"}],
+])
+
+MSG_METHOD_KB = keyboard([
+    [{"text": "🔄 可转存", "callback_data": "msg_method:forward"},
+     {"text": "⬇️ 需上传", "callback_data": "msg_method:upload"}],
+    [{"text": "❌ 取消", "callback_data": "cancel"}],
+])
+
+
+# ============================================================
+# 命令处理
+# ============================================================
+def handle_start(chat_id):
+    send_message(chat_id,
+        "<b>📡 TG Portal Bot</b>\n\n"
+        "直接发送群组链接或消息链接即可开始。\n\n"
+        "命令:\n"
+        "/stats - 查看统计\n"
+        "/list - 查看监控列表\n"
+        "/add - 快捷添加（默认一次性+可转存）\n"
+        "/help - 帮助")
+
+
+def handle_stats(chat_id):
+    from notify import collect_daily_stats
+    s = collect_daily_stats()
+    send_message(chat_id,
+        f"<b>📊 实时统计</b>\n\n"
+        f"📤 累计转发: <b>{s['forwarded']}</b>\n"
+        f"⏭️ 跳过: {s['skipped']}\n"
+        f"❌ 错误: {s['errors']}\n"
+        f"🔗 去重文件: {s.get('unique_files', 0)}\n"
+        f"📥 累计下载: {s.get('downloaded', 0)}")
+
+
+def handle_list(chat_id):
+    sources = load_json(SRC_CFG, [])
+    if not sources:
+        send_message(chat_id, "暂无监控群组。发送群链接添加。")
+        return
+    lines = ["<b>📋 监控列表</b>\n"]
+    for s in sources:
+        icon = "🟢" if s.get("enabled") else "🔴"
+        mode = "👁️监控" if s.get("mode") == "watch" else "📦一次"
+        method = "批量" if s.get("method") == "forward" else "上传"
+        interval = s.get("watch_interval_hours", "?")
+        done = "✅" if s.get("complete") else ""
+        lines.append(f"{icon} <b>{s['name']}</b> {mode} {method} {interval}h {done}")
+    send_message(chat_id, "\n".join(lines))
+
+
+def handle_add(chat_id, text):
+    """快捷添加：从文本中提取链接，添加为一次性+可转存"""
+    link_type, info = parse_link(text)
+    if link_type == "group":
+        group_id = info
+        name = f"bot_{group_id.replace('/','_')[:20]}"
+        sources = load_json(SRC_CFG, [])
+        sources.append({
+            "name": name, "source": group_id, "method": "forward",
+            "enabled": True, "mode": "once", "complete": False,
+            "watch_interval_hours": 6, "skip_photos": False,
+            "min_video_mb": 5, "extra_skip_words": [],
+        })
+        save_json(SRC_CFG, sources)
+        send_message(chat_id, f"✅ 已添加: <b>{name}</b>\n方式: 一次性转存 + 可转发\n运行: docker exec tg-login python /sessions/forward_engine.py --once")
+    elif link_type == "message":
+        send_message(chat_id, "消息链接暂不支持 /add，请发送完整链接进行交互式添加。")
+    else:
+        send_message(chat_id, "未识别到有效链接，请发送群组或消息链接。")
+
+
+# ============================================================
+# 回调处理
+# ============================================================
+def handle_callback(callback_id, chat_id, msg_id, data):
+    state = get_state(chat_id)
+    answer_callback(callback_id)
+
+    if data == "cancel":
+        clear_state(chat_id)
+        edit_message(chat_id, msg_id, "❌ 已取消")
+        return
+
+    # 消息链接流程
+    if data.startswith("msg_method:"):
+        method = data.split(":")[1]
+        info = state.get("pending_info")
+        if info:
+            chat_name, message_id = info
+            name = f"msg_{chat_name}_{message_id}"
+            sources = load_json(SRC_CFG, [])
+            sources.append({
+                "name": name, "source": chat_name, "method": method,
+                "enabled": True, "mode": "once", "complete": False,
+                "watch_interval_hours": 6, "skip_photos": False,
+                "min_video_mb": 5, "extra_skip_words": [],
+            })
+            save_json(SRC_CFG, sources)
+            clear_state(chat_id)
+            edit_message(chat_id, msg_id,
+                f"✅ 已添加单条消息转发\n"
+                f"群组: {chat_name}\n消息: {message_id}\n方式: {method}\n\n"
+                f"运行: docker exec tg-login python /sessions/forward_engine.py --once")
+        return
+
+    # 群组链接流程
+    if data.startswith("method:"):
+        method = data.split(":")[1]
+        set_state(chat_id, "method", method)
+        set_state(chat_id, "step", "mode")
+        edit_message(chat_id, msg_id,
+            f"已选择: {'🔄 可转存' if method == 'forward' else '⬇️ 需上传'}\n\n请选择转发模式:",
+            reply_markup=MODE_KB)
+        return
+
+    if data.startswith("mode:"):
+        mode = data.split(":")[1]
+        set_state(chat_id, "mode", mode)
+        if mode == "watch":
+            set_state(chat_id, "step", "interval")
+            edit_message(chat_id, msg_id, "请选择监控间隔:", reply_markup=INTERVAL_KB)
+        else:
+            # 一次性 → 直接完成
+            finalize_source(chat_id, msg_id)
+        return
+
+    if data.startswith("interval:"):
+        hours = int(data.split(":")[1])
+        set_state(chat_id, "watch_interval_hours", hours)
+        finalize_source(chat_id, msg_id)
+        return
+
+
+def finalize_source(chat_id, msg_id):
+    """完成添加源群"""
+    state = get_state(chat_id)
+    group_id = state.get("pending_group", "")
+    method = state.get("method", "forward")
+    mode = state.get("mode", "once")
+    interval = state.get("watch_interval_hours", 6)
+
+    name = f"bot_{group_id.replace('/','_')[:20]}"
+    sources = load_json(SRC_CFG, [])
+    # 检查是否已存在
+    for s in sources:
+        if s["name"] == name:
+            clear_state(chat_id)
+            edit_message(chat_id, msg_id, f"⚠️ 群组 <b>{name}</b> 已存在，请用 /list 查看")
+            return
+
+    sources.append({
+        "name": name, "source": group_id, "method": method,
+        "enabled": True, "mode": mode, "complete": False,
+        "watch_interval_hours": interval,
+        "skip_photos": method == "upload",
+        "min_video_mb": 5, "extra_skip_words": [],
+    })
+    save_json(SRC_CFG, sources)
+    clear_state(chat_id)
+
+    mode_text = f"👁️ 持续监控 (每{interval}h)" if mode == "watch" else "📦 一次性转存"
+    method_text = "🔄 可转存" if method == "forward" else "⬇️ 需下载上传"
+    edit_message(chat_id, msg_id,
+        f"<b>✅ 添加成功!</b>\n\n"
+        f"群组: <code>{group_id}</code>\n"
+        f"方式: {method_text}\n"
+        f"模式: {mode_text}\n\n"
+        f"{'自动运行中...' if mode == 'watch' else '运行: docker exec tg-login python /sessions/forward_engine.py --once'}")
+
+
+# ============================================================
+# 主循环
+# ============================================================
+def process_message(msg):
+    """处理收到的消息"""
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "").strip()
+    if not text:
+        return
+
+    # 命令
+    if text.startswith("/start") or text.startswith("/help"):
+        handle_start(chat_id)
+        return
+    if text.startswith("/stats"):
+        handle_stats(chat_id)
+        return
+    if text.startswith("/list"):
+        handle_list(chat_id)
+        return
+    if text.startswith("/add"):
+        handle_add(chat_id, text[5:].strip() or text)
+        return
+
+    # 解析链接
+    link_type, info = parse_link(text)
+    if not link_type:
+        send_message(chat_id, "未识别到链接。请发送:\n• 群组链接 https://t.me/xxx\n• 消息链接 https://t.me/xxx/123\n• 或使用 /add 快捷添加")
+        return
+
+    if link_type == "group":
+        set_state(chat_id, "pending_group", info)
+        set_state(chat_id, "step", "method")
+        send_message(chat_id,
+            f"📎 识别到群组: <code>{info}</code>\n\n请选择转发方式:",
+            reply_markup=METHOD_KB)
+
+    elif link_type == "message":
+        chat_name, message_id = info
+        set_state(chat_id, "pending_info", (chat_name, message_id))
+        set_state(chat_id, "step", "msg_method")
+        send_message(chat_id,
+            f"📎 识别到消息链接\n群组: <code>{chat_name}</code>\n消息: {message_id}\n\n请选择转发方式:",
+            reply_markup=MSG_METHOD_KB)
+
+
+def process_update(update):
+    if "message" in update:
+        msg = update["message"]
+        if "text" in msg:
+            process_message(msg)
+    elif "callback_query" in update:
+        cb = update["callback_query"]
+        handle_callback(
+            cb["id"],
+            cb["message"]["chat"]["id"],
+            cb["message"]["message_id"],
+            cb["data"]
+        )
+
+
+def main():
+    token = load_json(BOT_CFG).get("token", "")
+    if not token:
+        log("Bot token not configured. Set in web UI: Forward -> 通知")
+        return
+
+    log(f"Bot started. Polling...")
+    offset = 0
+
+    while True:
+        try:
+            result = api("getUpdates", {"offset": offset, "timeout": 30})
+            if result and result.get("ok") and result["result"]:
+                for update in result["result"]:
+                    offset = update["update_id"] + 1
+                    process_update(update)
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            log(f"Poll error: {e}")
+            time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()
