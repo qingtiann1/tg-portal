@@ -641,10 +641,35 @@ async def run_one_source(client, dst, cfg, dry=False):
     if dry:
         log("[DRY RUN]")
         return
-    if cfg["method"] == "forward":
-        await forward_batch(client, src, dst, cfg)
-    elif cfg["method"] == "upload":
-        await upload_group(client, src, dst, cfg)
+    success = True
+    error_msg = ""
+    try:
+        if cfg["method"] == "forward":
+            await forward_batch(client, src, dst, cfg)
+        elif cfg["method"] == "upload":
+            await upload_group(client, src, dst, cfg)
+    except Exception as e:
+        success = False
+        error_msg = str(e)[:300]
+        log(f"[{cfg['name']}] FAILED: {error_msg}")
+
+    # Bot 通知
+    try:
+        from notify import load_bot_config, send_message
+        bcfg = load_bot_config()
+        if bcfg.get("enabled") and bcfg.get("token") and bcfg.get("chat_id"):
+            srcs = load_sources()
+            total = len(srcs)
+            pending = len([s for s in srcs if not s.get("complete")])
+            if success:
+                send_message(bcfg["token"], bcfg["chat_id"],
+                    f\"✅ 任务完成: <b>{cfg['name']}</b>\\n群组: {cfg['source']}\\n方式: {cfg['method']}\\n\\n📋 剩余 {pending}/{total}\")
+            else:
+                send_message(bcfg["token"], bcfg["chat_id"],
+                    f\"❌ 任务失败: <b>{cfg['name']}</b>\\n群组: {cfg['source']}\\n原因: {error_msg}\\n\\n📋 剩余 {pending}/{total}\")
+    except Exception:
+        pass
+
     if cfg.get("mode", "once") == "once":
         srcs = load_sources()
         for s in srcs:

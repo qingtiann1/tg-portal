@@ -73,11 +73,21 @@ def send_chat_action(chat_id, action="typing"):
     return api("sendChatAction", {"chat_id": chat_id, "action": action})
 
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(chat_id, text, reply_markup=None, reply_to=None):
     data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup:
         data["reply_markup"] = reply_markup
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
     return api("sendMessage", data)
+
+
+def get_queue_info():
+    """获取队列信息：总任务数、待处理数"""
+    sources = load_json(SRC_CFG, [])
+    total = len(sources)
+    pending = len([s for s in sources if not s.get("complete")])
+    return total, pending
 
 
 def edit_message(chat_id, msg_id, text, reply_markup=None):
@@ -217,13 +227,20 @@ def handle_list(chat_id):
     send_message(chat_id, "\n".join(lines))
 
 
-def handle_add(chat_id, text):
+def handle_add(chat_id, reply_to, text):
     """快捷添加：从文本中提取链接，添加为一次性+可转存"""
     link_type, info = parse_link(text)
+    total, pending = get_queue_info()
+    queue_info = f"\n📋 队列 #{total}: 共 {total} 个源群，{pending} 个待处理"
+
     if link_type == "group":
         group_id = info
         name = f"bot_{group_id.replace('/','_')[:20]}"
         sources = load_json(SRC_CFG, [])
+        for s in sources:
+            if s["name"] == name:
+                send_message(chat_id, f"⚠️ <b>{name}</b> 已存在", reply_to=reply_to)
+                return
         sources.append({
             "name": name, "source": group_id, "method": "forward",
             "enabled": True, "mode": "once", "complete": False,
@@ -231,11 +248,11 @@ def handle_add(chat_id, text):
             "min_video_mb": 5, "extra_skip_words": [],
         })
         save_json(SRC_CFG, sources)
-        send_message(chat_id, f"✅ 已添加: <b>{name}</b>\n方式: 一次性转存 + 可转发\n运行: docker exec tg-login python /sessions/forward_engine.py --once")
+        send_message(chat_id, f"✅ 已添加: <b>{name}</b>\n方式: 一次性转存 + 可转发{queue_info}", reply_to=reply_to)
     elif link_type == "message":
-        send_message(chat_id, "消息链接暂不支持 /add，请发送完整链接进行交互式添加。")
+        send_message(chat_id, "消息链接请直接发送完整链接进行交互式添加", reply_to=reply_to)
     else:
-        send_message(chat_id, "未识别到有效链接，请发送群组或消息链接。")
+        send_message(chat_id, "未识别到有效链接，请发送群组或消息链接", reply_to=reply_to)
 
 
 # ============================================================
@@ -310,7 +327,6 @@ def finalize_source(chat_id, msg_id):
 
     name = f"bot_{group_id.replace('/','_')[:20]}"
     sources = load_json(SRC_CFG, [])
-    # 检查是否已存在
     for s in sources:
         if s["name"] == name:
             clear_state(chat_id)
@@ -327,14 +343,17 @@ def finalize_source(chat_id, msg_id):
     save_json(SRC_CFG, sources)
     clear_state(chat_id)
 
+    total, pending = get_queue_info()
+    queue_info = f"\n📋 队列: 共 {total} 个源群，{pending} 个待处理"
     mode_text = f"👁️ 持续监控 (每{interval}h)" if mode == "watch" else "📦 一次性转存"
     method_text = "🔄 可转存" if method == "forward" else "⬇️ 需下载上传"
+
     edit_message(chat_id, msg_id,
-        f"<b>✅ 添加成功!</b>\n\n"
+        f"<b>✅ 添加成功!</b> #{total}\n\n"
         f"群组: <code>{group_id}</code>\n"
         f"方式: {method_text}\n"
-        f"模式: {mode_text}\n\n"
-        f"{'自动运行中...' if mode == 'watch' else '运行: docker exec tg-login python /sessions/forward_engine.py --once'}")
+        f"模式: {mode_text}{queue_info}\n\n"
+        f"{'👁️ 自动监控运行中...' if mode == 'watch' else '💡 运行引擎: /sessions/forward_engine.py --once'}")
 
 
 # ============================================================
@@ -343,12 +362,16 @@ def finalize_source(chat_id, msg_id):
 def process_message(msg):
     """处理收到的消息"""
     chat_id = msg["chat"]["id"]
+    msg_id = msg.get("message_id")
     text = msg.get("text", "").strip()
     if not text:
         return
 
     # 立即显示"已看到，处理中"
     send_chat_action(chat_id, "typing")
+
+    def reply(text, **kw):
+        return send_message(chat_id, text, reply_to=msg_id, **kw)
 
     # 命令
     if text.startswith("/start") or text.startswith("/help"):
@@ -361,29 +384,30 @@ def process_message(msg):
         handle_list(chat_id)
         return
     if text.startswith("/add"):
-        handle_add(chat_id, text[5:].strip() or text)
+        handle_add(chat_id, msg_id, text[5:].strip() or text)
         return
 
     # 解析链接
     link_type, info = parse_link(text)
+    total, pending = get_queue_info()
+    queue_info = f"\n\n📋 队列: 共 {total} 个源群，{pending} 个待处理"
+
     if not link_type:
-        send_message(chat_id, "未识别到链接。请发送:\n• 群组链接 https://t.me/xxx\n• 消息链接 https://t.me/xxx/123\n• 或使用 /add 快捷添加")
+        reply("❌ 未识别到链接。请发送:\n• 群组链接 https://t.me/xxx\n• 消息链接 https://t.me/xxx/123\n• 或使用 /add 快捷添加" + queue_info)
         return
 
     if link_type == "group":
         set_state(chat_id, "pending_group", info)
         set_state(chat_id, "step", "method")
-        send_message(chat_id,
-            f"📎 识别到群组: <code>{info}</code>\n\n请选择转发方式:",
-            reply_markup=METHOD_KB)
+        reply(f"👀 已识别群组: <code>{info}</code>{queue_info}\n\n请选择转发方式:",
+              reply_markup=METHOD_KB)
 
     elif link_type == "message":
         chat_name, message_id = info
         set_state(chat_id, "pending_info", (chat_name, message_id))
         set_state(chat_id, "step", "msg_method")
-        send_message(chat_id,
-            f"📎 识别到消息链接\n群组: <code>{chat_name}</code>\n消息: {message_id}\n\n请选择转发方式:",
-            reply_markup=MSG_METHOD_KB)
+        reply(f"👀 已识别消息链接\n群组: <code>{chat_name}</code>\n消息: {message_id}{queue_info}\n\n请选择转发方式:",
+              reply_markup=MSG_METHOD_KB)
 
 
 def process_update(update):
