@@ -49,7 +49,7 @@ def _get_proxy():
     return os.environ.get("TG_PROXY", "http://mihomo:7890")
 
 
-def api(method, data=None):
+def api(method, data=None, timeout=30):
     """调用 Telegram Bot API"""
     cfg = load_json(BOT_CFG)
     token = cfg.get("token", "")
@@ -62,8 +62,13 @@ def api(method, data=None):
         proxy = _get_proxy()
         if proxy:
             req.set_proxy(proxy, "https")
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # 400/409 等是正常的（如 offset 过期），不打印错误
+        if e.code not in (400, 409):
+            log(f"API HTTP {e.code}")
+        return None
     except Exception as e:
         log(f"API error: {e}")
         return None
@@ -106,12 +111,16 @@ def answer_callback(callback_id, text=""):
 # ============================================================
 def parse_link(text):
     """解析消息中的链接，返回 (type, identifier)"""
-    # 消息链接: https://t.me/xxx/123 或 https://t.me/c/xxx/123
-    m = re.search(r"(?:https?://)?t(?:elegram)?\.me/(c/)?([^/\s]+)/(\d+)", text)
+    # 消息链接: https://t.me/xxx/123 或 https://t.me/c/1234567/4205
+    m = re.search(r"(?:https?://)?t(?:elegram)?\.me/(?:c/)?([^/\s]+)/(\d+)", text)
     if m:
-        prefix = "c/" if m.group(1) else ""
-        chat = f"{prefix}{m.group(2)}"
-        msg_id = int(m.group(3))
+        chat_raw = m.group(1)
+        msg_id = int(m.group(2))
+        # 私密群组链接格式: t.me/c/1234567890/123 → 转为完整 ID: -1001234567890
+        if chat_raw.isdigit() and not chat_raw.startswith("-"):
+            chat = f"-100{chat_raw}"
+        else:
+            chat = chat_raw
         return "message", (chat, msg_id)
 
     # 群组链接: https://t.me/xxx 或 @xxx
@@ -436,7 +445,7 @@ def main():
 
     while True:
         try:
-            result = api("getUpdates", {"offset": offset, "timeout": 30})
+            result = api("getUpdates", {"offset": offset, "timeout": 10}, timeout=25)
             if result and result.get("ok") and result["result"]:
                 for update in result["result"]:
                     offset = update["update_id"] + 1
