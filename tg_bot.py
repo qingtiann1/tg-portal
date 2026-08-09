@@ -41,9 +41,8 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# 在模块加载时设置代理（环境变量方式，不冲突）
-if not os.environ.get("HTTPS_PROXY"):
-    os.environ["HTTPS_PROXY"] = "http://mihomo:7890"
+# 使用 HTTP 代理，节点已切换为稳定的 nat1de-ws-tls
+os.environ["HTTPS_PROXY"] = "http://mihomo:7890"
 
 
 def api(method, data=None, timeout=20):

@@ -40,7 +40,7 @@ API_HASH = _os.environ.get("TG_API_HASH", "")
 DEST = int(_os.environ.get("TG_DEST_GROUP", "0"))
 PROXY_HOST = _os.environ.get("TG_PROXY_HOST", "mihomo")
 PROXY_PORT = int(_os.environ.get("TG_PROXY_PORT", "7890"))
-PROXY = {"scheme": "http", "hostname": PROXY_HOST, "port": PROXY_PORT}
+PROXY = {"scheme": "socks5", "hostname": PROXY_HOST, "port": PROXY_PORT}
 
 SDIR = "/app/sessions" if _os.path.isdir("/app/sessions") else "/sessions"
 SESSION = _os.path.join(SDIR, "media_downloader")
