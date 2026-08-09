@@ -628,10 +628,10 @@ async def upload_group(client, src, dst, cfg):
 # ============================================================
 async def run_one_source(client, dst, cfg, dry=False):
     """执行单个源群转发，完成后标记 complete"""
-    log(f"
-{'='*60}")
-    log(f"[{cfg['name']}] START method={cfg['method']} mode={cfg.get('mode','once')}")
-    log(f"{'='*60}")
+    sep = '=' * 60
+    log(sep)
+    log("[%s] START method=%s mode=%s" % (cfg['name'], cfg['method'], cfg.get('mode', 'once')))
+    log(sep)
     try:
         src = await client.get_chat(cfg["source"])
         log(f"Source: {src.title} (id={src.id})")
@@ -663,10 +663,10 @@ async def run_one_source(client, dst, cfg, dry=False):
             pending = len([s for s in srcs if not s.get("complete")])
             if success:
                 send_message(bcfg["token"], bcfg["chat_id"],
-                    f\"✅ 任务完成: <b>{cfg['name']}</b>\\n群组: {cfg['source']}\\n方式: {cfg['method']}\\n\\n📋 剩余 {pending}/{total}\")
+                    f"✅ 任务完成: <b>{cfg['name']}</b>\\n群组: {cfg['source']}\\n方式: {cfg['method']}\\n\\n📋 剩余 {pending}/{total}")
             else:
                 send_message(bcfg["token"], bcfg["chat_id"],
-                    f\"❌ 任务失败: <b>{cfg['name']}</b>\\n群组: {cfg['source']}\\n原因: {error_msg}\\n\\n📋 剩余 {pending}/{total}\")
+                    f"❌ 任务失败: <b>{cfg['name']}</b>\\n群组: {cfg['source']}\\n原因: {error_msg}\\n\\n📋 剩余 {pending}/{total}")
     except Exception:
         pass
 
@@ -717,12 +717,11 @@ async def main():
             h = s.get("watch_interval_hours", DEFAULT_WATCH_INTERVAL_HOURS)
             log(f"  Watching: {s['name']} every {h}h")
         while True:
-            log(f"
-[Watch] Checking {len(watching)} groups...")
+            log("[Watch] Checking %d groups..." % len(watching))
             for cfg in watching:
                 await run_one_source(client, dst, cfg)
             h = min(s.get("watch_interval_hours", DEFAULT_WATCH_INTERVAL_HOURS) for s in watching)
-            log(f"[Watch] Sleeping {h}h...")
+            log("[Watch] Sleeping %dh..." % h)
             await asyncio.sleep(h * 3600)
 
     elif once_mode or dry_run:
@@ -731,8 +730,7 @@ async def main():
                 log(f"[{cfg['name']}] Already complete, skip.")
                 continue
             await run_one_source(client, dst, cfg, dry=dry_run)
-        log("
-===== ONCE DONE =====")
+        log("\\n===== ONCE DONE =====")
 
     else:
         for cfg in active:
