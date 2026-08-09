@@ -115,6 +115,11 @@
           <!-- 统计 -->
           <div class="forward-stats" id="forward_stats"></div>
           <table class="layui-hide" id="forward_list" lay-filter="forward_list"></table>
+          <!-- 操作日志 -->
+          <fieldset class="layui-elem-field" style="margin-top:10px">
+            <legend style="font-size:12px;font-weight:700">📝 操作日志 <button class="layui-btn layui-btn-xs layui-btn-primary" onclick="loadWebLog()" style="margin-left:8px">刷新</button></legend>
+            <div id="web_log" style="max-height:200px;overflow-y:auto;background:#1e1e1e;color:#d4d4d4;font:11px monospace;padding:6px 10px;border-radius:3px;white-space:pre-wrap;word-break:break-all"></div>
+          </fieldset>
         </div>
       </div>
     </div>
@@ -237,7 +242,7 @@
           $.post('ctl_downloader', {action:'stop_fwd'}, function(){});
           layer.msg('已添加: '+name+' (一次性转存)');
           $('#once_input').val('');
-          loadSources();
+          loadSources(); loadWebLog();
         });
       };
 
@@ -254,7 +259,7 @@
             $.post('ctl_downloader', {action:'stop_fwd'}, function(){});
             layer.msg('已添加监控: w_'+name+' (每'+interval+'h)');
             $('#watch_input').val('');
-            loadSources();
+            loadSources(); loadWebLog();
           });
         });
       };
@@ -297,6 +302,13 @@
       window.testBot = function() {
         $.post('test_bot', function(r) {
           layer.msg(r.status==='ok'?'测试成功!':'失败: '+(r.error||'?'));
+        });
+      };
+      window.loadWebLog = function() {
+        $.get('get_web_log', function(r) {
+          var lines = (r.log||[]);
+          $('#web_log').html(lines.length ? lines.join('\n') : '<span style="color:#888">暂无操作记录</span>');
+          $('#web_log').scrollTop($('#web_log')[0].scrollHeight);
         });
       };
 
@@ -371,6 +383,7 @@
           success: function (r) {
             if (r.task_id) layer.msg('Started: ' + r.task_id);
             else layer.msg('Error: ' + (r.error || 'unknown'));
+            loadWebLog();
           }});
         return false;
       };

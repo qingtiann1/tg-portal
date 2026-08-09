@@ -14,6 +14,7 @@ import re
 import subprocess
 import threading
 import time
+import urllib.request
 
 from flask import Flask, jsonify, render_template, request
 from flask_login import LoginManager, UserMixin, login_required, login_user
@@ -260,6 +261,16 @@ def start_forward():
     _running_tasks[task_id] = {"status": "running", "progress": 0, "group": group_input}
 
     is_message = bool(re.search(r"/\d+$", group_input))
+    method_label = "下载上传" if method == "upload" else "转发"
+    if is_message:
+        label = f"🔗 链接已添加（{method_label}）\n{group_input}"
+        log_msg = f"链接已添加({method_label}): {group_input[:50]}"
+    else:
+        label = f"📁 群组一次性转发，已添加（{method_label}）\n{group_input}"
+        log_msg = f"群组一次性转发({method_label}): {group_input[:50]}"
+    notify_ok = _send_tg_notification(label)
+    _add_web_log(f"{log_msg} | Bot通知: {'OK' if notify_ok else '失败'}")
+
     cmd = ["docker", "exec", "tg-login", "python3", ENGINE_SCRIPT]
     if is_message:
         cmd += ["--single", group_input, "--method", method]
@@ -408,6 +419,12 @@ def save_sources():
             "min_video_mb": _load_config().get("min_video_mb", 5),
             "extra_skip_words": [],
         })
+        # TG 通知
+        method_label = "下载上传" if method == "upload" else "转发"
+        mode_label = "一次性监控" if sources[-1]["mode"] == "once" else "持续监控"
+        notify_text = f"📋 群组{mode_label}，已添加（{method_label}）\n📌 {name}\n🔗 {src}"
+        notify_ok = _send_tg_notification(notify_text)
+        _add_web_log(f"群组{mode_label}({method_label}): {name} | Bot通知: {'OK' if notify_ok else '失败'}")
     elif action == "remove":
         sources = [s for s in sources if s["name"] != name]
     elif action == "toggle":
@@ -443,6 +460,33 @@ def _load_bot_cfg():
                 return json.load(f)
         except: pass
     return {"token": "", "chat_id": "", "enabled": False, "daily_report_hour": 20}
+
+
+def _send_tg_notification(text):
+    """通过 Telegram Bot API 发送通知（子进程方式，避免 Flask 线程冲突）"""
+    import subprocess as _sp
+    script = os.path.join(SESSIONS_DIR, "notify_send.py")
+    try:
+        _sp.run(["python3", script, text], timeout=15, capture_output=True)
+        return True
+    except Exception as e:
+        print(f"[WebNotify] subprocess failed: {e}")
+        return False
+
+# Web UI 操作日志（最近 50 条）
+_WEB_LOG = []
+
+def _add_web_log(msg):
+    """添加 Web UI 操作日志"""
+    ts = time.strftime("%H:%M:%S")
+    _WEB_LOG.append(f"[{ts}] {msg}")
+    if len(_WEB_LOG) > 50:
+        _WEB_LOG.pop(0)
+
+@_flask_app.route("/get_web_log")
+@login_required
+def get_web_log():
+    return jsonify({"log": _WEB_LOG})
 
 @_flask_app.route("/get_bot_config")
 @login_required
