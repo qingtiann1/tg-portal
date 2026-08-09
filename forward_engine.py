@@ -21,6 +21,20 @@ from pyrogram import Client
 # ============================================================
 import os as _os
 
+# 尝试从 .env 文件加载（解决 docker exec 不继承环境变量的问题）
+def _load_env():
+    for path in ["/sessions/.env", "/app/sessions/.env"]:
+        if _os.path.isfile(path):
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        if k not in _os.environ:
+                            _os.environ[k] = v.strip()
+
+_load_env()
+
 API_ID = int(_os.environ.get("TG_API_ID", "0"))
 API_HASH = _os.environ.get("TG_API_HASH", "")
 DEST = int(_os.environ.get("TG_DEST_GROUP", "0"))
@@ -720,9 +734,13 @@ async def main():
             log("[Watch] Checking %d groups..." % len(watching))
             for cfg in watching:
                 await run_one_source(client, dst, cfg)
+            # 释放 session，让 tg-downloader 可以在间隔期使用
+            await client.stop()
             h = min(s.get("watch_interval_hours", DEFAULT_WATCH_INTERVAL_HOURS) for s in watching)
-            log("[Watch] Sleeping %dh..." % h)
+            log("[Watch] Sleeping %dh (session released)..." % h)
             await asyncio.sleep(h * 3600)
+            # 重新连接
+            await client.start()
 
     elif once_mode or dry_run:
         for cfg in active:
