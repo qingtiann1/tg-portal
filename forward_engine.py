@@ -40,10 +40,10 @@ API_HASH = _os.environ.get("TG_API_HASH", "")
 DEST = int(_os.environ.get("TG_DEST_GROUP", "0"))
 PROXY_HOST = _os.environ.get("TG_PROXY_HOST", "mihomo")
 PROXY_PORT = int(_os.environ.get("TG_PROXY_PORT", "7890"))
-PROXY = {"scheme": "socks5", "hostname": PROXY_HOST, "port": PROXY_PORT}
+PROXY = {"scheme": "http", "hostname": PROXY_HOST, "port": PROXY_PORT}
 
 SDIR = "/app/sessions" if _os.path.isdir("/app/sessions") else "/sessions"
-SESSION = _os.path.join(SDIR, "media_downloader")
+SESSION = _os.path.join(SDIR, "fwd_engine")
 DEDUP_FILE = _os.path.join(SDIR, "downloaded_ids.txt")
 FWD_LOG_FILE = _os.path.join(SDIR, "forwarded_log.json")
 SRC_CFG_FILE = _os.path.join(SDIR, "sources_config.json")   # 源群配置（网页可编辑）
@@ -80,13 +80,33 @@ SOURCES = load_sources()
 # ============================================================
 # 垃圾过滤
 # ============================================================
+# 硬黑名单：直接拦截（用户明确要求的内容过滤）
 SKIP_PHRASES = [
-    "一键清理", "清理僵尸粉", "僵尸粉", "清除",
-    "加群", "进群", "群号", "复制群", "打开群",
-    "免费约", "同城约", "私聊", "一对一", "1v1", "1对1",
-    "扫码", "关注公众号", "成人站",
+    "男娘", "变性", "gay", "Gay", "GAY", "VR",
+    "人妖", "伪娘", "Shemale", "shemale", "ladyboy",
 ]
+
 URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+MENTION_RE = re.compile(r"@\w+|t\.me/\w+", re.IGNORECASE)
+
+# 赌博/广告关键词（不单独触发，需配合结构弱信号：短视频≤25s / 1-2图 / 无视频）
+GAMBLING_WORDS = {
+    # 赌博平台名
+    "HPAY", "hpay", "金运国际", "金运娱乐", "金运", "BBIN",
+    # 赌博游戏名
+    "PG电子", "赏金女王", "百家乐",
+    # 赌博金融术语
+    "爆奖", "爆分", "汇旺", "彩金", "体验金", "首充", "首存",
+    "救援金", "回归彩金", "生日礼金", "提款", "喜提", "USDT",
+    "充值赠送", "注册即享",
+    # 下注/赌博专用语
+    "下注", "赌场", "单注金额", "单注倍数", "爆分金额", "视频奖励",
+    "一点配三边", "四点配两边", "电子大水中",
+    # 广告/推广专用语
+    "官方网址", "官方客服号", "官网注册",
+    "频道赞助商", "频道专属代码", "赞助直播",
+    "会员爆奖", "hpay77", "帕拉梅拉",
+}
 
 
 def log(msg):
@@ -191,36 +211,99 @@ def record_forward(fid, msg_id, source_name, meta=None):
     save_forwarded_log(fwd_log)
 
 
-def is_spam(msg):
-    """判断是否垃圾消息（直接跳过）"""
+def is_spam(msg, cfg=None):
+    """结构性垃圾判断：短内容 + 推广特征 = 广告"""
     text = (msg.text or msg.caption or "")
     tl = text.lower()
     has_video = bool(msg.video or (msg.document and "video" in (getattr(msg.document, "mime_type", "") or "")))
     has_photo = bool(msg.photo)
     has_url = bool(URL_RE.search(tl))
+    has_mention = bool(MENTION_RE.search(tl))
+    has_gamble = any(w in text for w in GAMBLING_WORDS)
 
-    for phrase in SKIP_PHRASES:
-        if phrase in text:
-            return True, f"skip:{phrase}"
-    if msg.sticker or msg.animation:
-        return True, "sticker/gif"
-    if has_photo and not has_video and has_url:
-        return True, "photo+url"
-    if not has_video and not has_photo and has_url and len(text) < 300:
-        return True, "text+url"
-    if msg.forward_from_chat and not has_video and not has_photo:
-        return True, "forward no media"
+    # 图片数量
+    photo_count = 0
+    if msg.photo:
+        photo_count = 1
+    if msg.grouped_id:
+        pass  # 多图由外层处理
+
+    # 视频时长
+    video_dur = 0
     if msg.video:
-        dur = getattr(msg.video, "duration", 0) or 0
-        if dur < MIN_DURATION:
-            return True, f"short {dur}s"
+        video_dur = getattr(msg.video, "duration", 0) or 0
     if msg.document:
         mime = getattr(msg.document, "mime_type", "") or ""
         if "video" in mime:
-            dur = getattr(msg.document, "duration", 0) or 0
-            if dur < MIN_DURATION:
-                return True, f"short doc {dur}s"
+            video_dur = getattr(msg.document, "duration", 0) or 0
+
+    # ====== 结构规则 ======
+
+    # 1. 硬黑名单：直接跳过（用户明确的敏感内容）
+    for phrase in SKIP_PHRASES:
+        if phrase in text:
+            return True, f"skip:{phrase}"
+
+    # 2. 贴纸/GIF 无实质内容
+    if msg.sticker or msg.animation:
+        return True, "sticker/gif"
+
+    # 3. 广告核心规则：赌博关键词 + 结构性弱信号 → 广告
+    if has_gamble:
+        # 3a. 视频≤25秒 + 赌博词 → 广告
+        if video_dur > 0 and video_dur <= 25:
+            return True, f"gamble short video {video_dur}s"
+        # 3b. 1-2张图片 + 有链接/@ → 广告
+        if has_photo and (has_url or has_mention):
+            return True, "gamble photo+link"
+        # 3c. 纯文本 + 链接 + 赌博词 → 广告
+        if not has_video and not has_photo and has_url:
+            return True, "gamble text+url"
+        # 3d. 表情密度高 + 赌博词 → 广告
+        if len(text) > 30:
+            emoji_count = sum(1 for ch in text if _is_emoji(ch))
+            if emoji_count / len(text) > 0.3:
+                return True, "gamble emoji spam"
+
+    # 4. 无视频/少图 + 推广链接（非赌博也拦截）
+    if has_url and has_mention and not has_video:
+        if has_photo and photo_count <= 2:
+            return True, "ad photo+link+mention"
+        if not has_photo and len(text) < 500:
+            return True, "ad text+link+mention"
+
+    # 5. 空caption的短视频（可能是广告视频无标题）
+    #   不放这里，留给正常视频通过
+
+    # 6. 图片+链接（典型广告，无视频）
+    if has_photo and not has_video and has_url and not has_gamble:
+        # 放宽：图片+链接但无赌博词、无mention → 可能是正常分享
+        if has_mention:
+            return True, "photo+link+mention"
+
+    # 7. 纯文本链接短消息（引流）
+    if not has_video and not has_photo and has_url and len(text) < 200:
+        if has_mention or has_gamble:
+            return True, "short text+link"
+
     return False, ""
+
+
+def _is_emoji(ch):
+    """判断字符是否为 emoji"""
+    cp = ord(ch)
+    return (
+        0x1F600 <= cp <= 0x1F64F or
+        0x1F300 <= cp <= 0x1F5FF or
+        0x1F680 <= cp <= 0x1F6FF or
+        0x2600 <= cp <= 0x26FF or
+        0x2700 <= cp <= 0x27BF or
+        0xFE00 <= cp <= 0xFE0F or
+        0x1F900 <= cp <= 0x1F9FF or
+        0x1FA00 <= cp <= 0x1FA6F or
+        0x200D == cp or
+        0x20E3 == cp
+    )
 
 
 def is_media(msg):
