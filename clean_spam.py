@@ -1,6 +1,6 @@
 """
-Clean spam from TGdown — scan forwarded messages and delete ads
-Uses structural rules: gambling keyword + short video/low image count/promo links
+Clean spam from TGdown — scan forwarded messages, delete ads
+Uses structural rules: gambling keyword + content weakness (short video, few imgs)
 """
 import asyncio, json, os, re, sys
 from pyrogram import Client
@@ -10,60 +10,65 @@ FWD_LOG = os.path.join(SDIR, "forwarded_log.json")
 DEST = -1004420616732  # TGdown
 
 URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
-MENTION_RE = re.compile(r"@\w+|t\.me/\w+", re.IGNORECASE)
 
-GAMBLING_WORDS = {
-    "HPAY", "hpay", "金运国际", "金运", "百家乐", "BBIN",
-    "PG电子", "赏金女王", "爆奖", "爆分", "汇旺", "首充", "首存",
-    "彩金", "体验金", "打码", "返利", "注册即享", "官方网址",
-    "官方客服", "官网注册", "赞助", "频道赞助商",
-    "下注", "赌场", "USDT", "提款", "喜提",
-    "会员投稿", "会员爆奖", "hpay77",
-    "救援金", "回归彩金", "生日礼金", "帕拉梅拉",
-}
-
-# Hard blacklist: must skip regardless
+# Same as forward_engine.py
 SKIP_PHRASES = [
     "男娘", "变性", "gay", "Gay", "GAY", "VR",
     "人妖", "伪娘", "Shemale", "shemale", "ladyboy",
 ]
 
-def is_spam_text(text):
-    """Structural spam detection"""
-    if not text:
-        return False
+GAMBLING_WORDS = {
+    "HPAY", "hpay", "金运国际", "金运娱乐", "金运", "BBIN",
+    "PG电子", "赏金女王", "百家乐",
+    "爆奖", "爆分", "汇旺", "彩金", "体验金", "首充", "首存",
+    "救援金", "回归彩金", "生日礼金", "提款", "喜提", "USDT",
+    "充值赠送", "注册即享",
+    "下注", "赌场", "单注金额", "单注倍数", "爆分金额", "视频奖励",
+    "一点配三边", "四点配两边", "电子大水中",
+    "官方网址", "官方客服号", "官网注册",
+    "频道赞助商", "频道专属代码", "赞助直播",
+    "会员爆奖", "hpay77", "帕拉梅拉",
+}
 
-    # Hard blacklist (user-requested content filter)
+
+def is_spam(msg):
+    """Structural spam detection - mirrors forward_engine.py"""
+    text = msg.caption or msg.text or ""
+
+    # Hard blacklist
     for phrase in SKIP_PHRASES:
         if phrase in text:
-            return True
+            return True, f"blacklist:{phrase}"
 
     has_gamble = any(w in text for w in GAMBLING_WORDS)
     if not has_gamble:
-        return False
+        return False, ""
 
-    # Gambling keyword detected — check structural weakness
+    has_video = bool(msg.video or (msg.document and "video" in (getattr(msg.document, "mime_type", "") or "")))
+    has_photo = bool(msg.photo)
     has_url = bool(URL_RE.search(text))
-    has_mention = bool(MENTION_RE.search(text))
 
-    # Emoji density
-    emoji_ratio = 0
+    video_dur = 0
+    if msg.video:
+        video_dur = getattr(msg.video, "duration", 0) or 0
+    if msg.document:
+        mime = getattr(msg.document, "mime_type", "") or ""
+        if "video" in mime:
+            video_dur = getattr(msg.document, "duration", 0) or 0
+
+    # Structural rules
+    if video_dur > 0 and video_dur <= 25:
+        return True, f"gamble+short_video({video_dur}s)"
+    if has_photo and not has_video and has_url:
+        return True, "gamble+photo+url"
+    if not has_video and not has_photo and has_url:
+        return True, "gamble+text+url"
     if len(text) > 30:
         emoji_count = sum(1 for ch in text if ord(ch) > 0x2600)
-        emoji_ratio = emoji_count / len(text)
+        if emoji_count / len(text) > 0.3:
+            return True, "gamble+emoji"
 
-    # Structural rules (same as forward_engine.py):
-    # - Gambling + URL → ad
-    if has_url:
-        return True
-    # - Gambling + @mention → ad
-    if has_mention:
-        return True
-    # - Gambling + high emoji density → ad
-    if emoji_ratio > 0.3:
-        return True
-
-    return False
+    return False, ""
 
 
 async def main():
@@ -81,36 +86,35 @@ async def main():
         fwd = json.load(f)
 
     spam_ids = []
-    total = len(fwd)
     checked = 0
+    total = len(fwd)
 
     for fid, info in fwd.items():
         checked += 1
         msg_id = info.get("msg_id")
         if not msg_id:
             continue
-
         try:
             msg = await client.get_messages(DEST, msg_id)
             if msg:
-                text = msg.caption or msg.text or ""
-                if is_spam_text(text):
+                is_sp, reason = is_spam(msg)
+                if is_sp:
                     spam_ids.append(msg_id)
-                    print(f"  SPAM [{checked}/{total}] msg {msg_id} | {text[:80]}")
+                    caption = (msg.caption or msg.text or "")[:80]
+                    print(f"  SPAM [{checked}/{total}] msg {msg_id} | {reason} | {caption}")
         except Exception as e:
             print(f"  SKIP [{checked}/{total}] msg {msg_id}: {e}")
 
-        if checked % 100 == 0:
+        if checked % 200 == 0:
             print(f"  ...checked {checked}/{total}")
 
-    print(f"\nTotal: {len(spam_ids)} spam / {total} forwarded")
+    print(f"\nFound {len(spam_ids)} spam / {total} total")
 
     if not spam_ids:
         print("Nothing to delete")
         await client.stop()
         return
 
-    # Delete
     print(f"Deleting {len(spam_ids)} messages...")
     deleted = 0
     for i in range(0, len(spam_ids), 100):
@@ -135,13 +139,12 @@ async def main():
                 print(f"  fail: {err[:100]}")
         await asyncio.sleep(3)
 
-    # Clean forwarded_log
     spam_set = set(spam_ids)
     cleaned = {k: v for k, v in fwd.items() if v.get("msg_id") not in spam_set}
     with open(FWD_LOG, "w") as f:
         json.dump(cleaned, f, ensure_ascii=False, indent=2)
     print(f"forwarded_log: {len(fwd)} -> {len(cleaned)}")
-    print(f"DONE! Deleted {deleted} spam messages")
+    print(f"DONE! Deleted {deleted} spam")
     await client.stop()
 
 asyncio.run(main())

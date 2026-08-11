@@ -84,15 +84,20 @@ SOURCES = load_sources()
 SKIP_PHRASES = [
     "男娘", "变性", "gay", "Gay", "GAY", "VR",
     "人妖", "伪娘", "Shemale", "shemale", "ladyboy",
+    # 诈骗/钓鱼
+    "清理僵尸粉", "一键清理", "点击开始验证", "正在一键清理",
+    "僵尸粉过多", "自动踢出频道", "未验证的会被",
 ]
 
 URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 MENTION_RE = re.compile(r"@\w+|t\.me/\w+", re.IGNORECASE)
+# 裸域名（无 http 前缀的推广域名，如 hpay77.cc）
+BARE_DOMAIN_RE = re.compile(r'\b[\w-]+\.(?:cc|com|net|xyz|top|vip)\b', re.IGNORECASE)
 
-# 赌博/广告关键词（不单独触发，需配合结构弱信号：短视频≤25s / 1-2图 / 无视频）
+# 赌博/广告关键词
 GAMBLING_WORDS = {
     # 赌博平台名
-    "HPAY", "hpay", "金运国际", "金运娱乐", "金运", "BBIN",
+    "HPAY", "HPAY娱乐", "hpay", "金运国际", "金运娱乐", "金运", "BBIN",
     # 赌博游戏名
     "PG电子", "赏金女王", "百家乐",
     # 赌博金融术语
@@ -107,6 +112,17 @@ GAMBLING_WORDS = {
     "频道赞助商", "频道专属代码", "赞助直播",
     "会员爆奖", "hpay77", "帕拉梅拉",
 }
+
+# 绝对拦截组合规则：(关键词A, 关键词B) 同时出现 → 不论视频多长都拦截
+# 这些是100%确定的广告模式
+ABSOLUTE_PAIRS = [
+    ("HPAY", "赞助直播"),
+    ("帕拉梅拉", "金运"),
+    ("BBIN", "百家乐"),
+    ("PG电子", "爆分"),
+    ("官方网址", "hpay77"),
+    ("官方客服号", "汇旺"),
+]
 
 
 def log(msg):
@@ -212,21 +228,15 @@ def record_forward(fid, msg_id, source_name, meta=None):
 
 
 def is_spam(msg, cfg=None):
-    """结构性垃圾判断：短内容 + 推广特征 = 广告"""
+    """结构性垃圾判断 + 绝对拦截规则"""
     text = (msg.text or msg.caption or "")
     tl = text.lower()
     has_video = bool(msg.video or (msg.document and "video" in (getattr(msg.document, "mime_type", "") or "")))
     has_photo = bool(msg.photo)
     has_url = bool(URL_RE.search(tl))
     has_mention = bool(MENTION_RE.search(tl))
-    has_gamble = any(w in text for w in GAMBLING_WORDS)
-
-    # 图片数量
-    photo_count = 0
-    if msg.photo:
-        photo_count = 1
-    if msg.grouped_id:
-        pass  # 多图由外层处理
+    has_bare_domain = bool(BARE_DOMAIN_RE.search(tl))
+    gamble_count = sum(1 for w in GAMBLING_WORDS if w in text)
 
     # 视频时长
     video_dur = 0
@@ -237,54 +247,56 @@ def is_spam(msg, cfg=None):
         if "video" in mime:
             video_dur = getattr(msg.document, "duration", 0) or 0
 
-    # ====== 结构规则 ======
-
-    # 1. 硬黑名单：直接跳过（用户明确的敏感内容）
+    # ====== 0. 硬黑名单 ======
     for phrase in SKIP_PHRASES:
         if phrase in text:
             return True, f"skip:{phrase}"
 
-    # 2. 贴纸/GIF 无实质内容
     if msg.sticker or msg.animation:
         return True, "sticker/gif"
 
-    # 3. 广告核心规则：赌博关键词 + 结构性弱信号 → 广告
-    if has_gamble:
-        # 3a. 视频≤25秒 + 赌博词 → 广告
+    # ====== 1. 绝对拦截：100%确定的广告模式（不论视频长度）======
+
+    # 1a. 裸域名 + 赌博关键词 → 绝对广告
+    if has_bare_domain and gamble_count >= 1:
+        return True, f"absolute:domain+{gamble_count}kw"
+
+    # 1b. 绝对组合对（两个特定关键词同时出现）
+    for a, b in ABSOLUTE_PAIRS:
+        if a in text and b in text:
+            return True, f"absolute:{a}+{b}"
+
+    # 1c. 高密度关键词（≥3个）+ @mention → 绝对广告
+    if gamble_count >= 3 and has_mention:
+        return True, f"absolute:{gamble_count}kw+mention"
+
+    # 1d. ≥5个赌博关键词 → 绝对广告（不论有无视频/链接）
+    if gamble_count >= 5:
+        return True, f"absolute:dense({gamble_count}kw)"
+
+    # ====== 2. 结构规则：赌博关键词 + 弱信号 ======
+    if gamble_count >= 1:
+        # 2a. 视频≤25秒
         if video_dur > 0 and video_dur <= 25:
-            return True, f"gamble short video {video_dur}s"
-        # 3b. 1-2张图片 + 有链接/@ → 广告
-        if has_photo and (has_url or has_mention):
-            return True, "gamble photo+link"
-        # 3c. 纯文本 + 链接 + 赌博词 → 广告
-        if not has_video and not has_photo and has_url:
-            return True, "gamble text+url"
-        # 3d. 表情密度高 + 赌博词 → 广告
+            return True, f"gamble+short({video_dur}s)"
+        # 2b. 图片 + 链接/@/域名
+        if has_photo and (has_url or has_mention or has_bare_domain):
+            return True, "gamble+photo+link"
+        # 2c. 纯文本 + 链接/@/域名
+        if not has_video and not has_photo and (has_url or has_mention or has_bare_domain):
+            return True, "gamble+text+link"
+        # 2d. 高表情密度
         if len(text) > 30:
-            emoji_count = sum(1 for ch in text if _is_emoji(ch))
-            if emoji_count / len(text) > 0.3:
-                return True, "gamble emoji spam"
+            ec = sum(1 for ch in text if _is_emoji(ch))
+            if ec / len(text) > 0.3:
+                return True, "gamble+emoji"
 
-    # 4. 无视频/少图 + 推广链接（非赌博也拦截）
+    # ====== 3. 通用广告（非赌博）======
     if has_url and has_mention and not has_video:
-        if has_photo and photo_count <= 2:
-            return True, "ad photo+link+mention"
-        if not has_photo and len(text) < 500:
-            return True, "ad text+link+mention"
-
-    # 5. 空caption的短视频（可能是广告视频无标题）
-    #   不放这里，留给正常视频通过
-
-    # 6. 图片+链接（典型广告，无视频）
-    if has_photo and not has_video and has_url and not has_gamble:
-        # 放宽：图片+链接但无赌博词、无mention → 可能是正常分享
-        if has_mention:
-            return True, "photo+link+mention"
-
-    # 7. 纯文本链接短消息（引流）
-    if not has_video and not has_photo and has_url and len(text) < 200:
-        if has_mention or has_gamble:
-            return True, "short text+link"
+        if has_photo:
+            return True, "ad+photo+link+mention"
+        if len(text) < 500:
+            return True, "ad+text+link+mention"
 
     return False, ""
 
@@ -412,14 +424,46 @@ async def forward_batch(client, src, dst, cfg):
             os.remove(pf)
         return
 
-    for i in range(0, len(pending), FW_BATCH):
-        batch = pending[i : i + FW_BATCH]
-        log(f"[{name}] [{i+1}-{min(i+FW_BATCH, len(pending))}/{len(pending)}] {batch[:5]}...")
+    # === 构建 media_group 映射，确保相册消息完整转发 ===
+    # msg_id -> media_group_id (仅对有分组的消息)
+    msg_groups = {}
+    for msg in all_msgs:
+        gid = getattr(msg, 'media_group_id', None)
+        if gid:
+            msg_groups[msg.id] = gid
+
+    # 把 pending 展开：遇到同相册的，把未转发的组员也加入
+    expanded_pending = []
+    seen = set()
+    for mid in pending:
+        if mid in seen:
+            continue
+        gid = msg_groups.get(mid)
+        if gid:
+            # 找到同组所有消息（按 ID 排序）
+            group_msgs = sorted([m for m in all_msgs if getattr(m, 'media_group_id', None) == gid], key=lambda x: x.id)
+            group_ids = [m.id for m in group_msgs]
+            for gmid in group_ids:
+                if gmid not in seen:
+                    expanded_pending.append(gmid)
+                    seen.add(gmid)
+            if len(group_ids) > 1:
+                log(f"[{name}] Group {gid}: {len(group_ids)} msgs -> batch forward")
+        else:
+            expanded_pending.append(mid)
+            seen.add(mid)
+
+    # 按 message ID 排序确保顺序
+    expanded_pending.sort()
+
+    for i in range(0, len(expanded_pending), FW_BATCH):
+        batch = expanded_pending[i : i + FW_BATCH]
+        sorted_batch = sorted(batch)  # Telegram 要求升序
+        log(f"[{name}] [{i+1}-{min(i+FW_BATCH, len(expanded_pending))}/{len(expanded_pending)}] {sorted_batch[:5]}...")
         try:
-            sent_msgs = await client.forward_messages(dst.id, src.id, batch)
-            fwd += len(batch)
-            last_id = batch[-1]
-            # 记录去重（写入 TGdown 消息链接）
+            sent_msgs = await client.forward_messages(dst.id, src.id, sorted_batch)
+            fwd += len(sorted_batch)
+            last_id = sorted_batch[-1]
             if sent_msgs:
                 for sm in sent_msgs if isinstance(sent_msgs, list) else [sent_msgs]:
                     src_mid = getattr(sm, "forward_from_message_id", 0)
@@ -436,9 +480,9 @@ async def forward_batch(client, src, dst, cfg):
                 log(f"  FLOOD {wait}s (saved)...")
                 await asyncio.sleep(wait)
                 try:
-                    sent_msgs = await client.forward_messages(dst.id, src.id, batch)
-                    fwd += len(batch)
-                    last_id = batch[-1]
+                    sent_msgs = await client.forward_messages(dst.id, src.id, sorted_batch)
+                    fwd += len(sorted_batch)
+                    last_id = sorted_batch[-1]
                     if sent_msgs:
                         for sm in sent_msgs if isinstance(sent_msgs, list) else [sent_msgs]:
                             src_mid = getattr(sm, "forward_from_message_id", 0)
@@ -447,10 +491,10 @@ async def forward_batch(client, src, dst, cfg):
                     save()
                     log(f"  Retry OK ({fwd} total)")
                 except Exception as e2:
-                    err += len(batch)
+                    err += len(sorted_batch)
                     log(f"  FAIL: {str(e2)[:120]}")
             else:
-                err += len(batch)
+                err += len(sorted_batch)
                 log(f"  FAIL: {err_str[:120]}")
         await asyncio.sleep(FW_DELAY)
 
