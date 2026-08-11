@@ -420,8 +420,9 @@ async def forward_batch(client, src, dst, cfg):
 
     if not pending:
         log(f"[{name}] All done!")
-        if os.path.exists(pf):
-            os.remove(pf)
+        # Keep progress for watch mode: record latest ID so next cycle only scans new msgs
+        last_id = max(m.id for m in all_msgs) if all_msgs else last_id
+        save()
         return
 
     # === 构建 media_group 映射，确保相册消息完整转发 ===
@@ -682,8 +683,9 @@ async def upload_group(client, src, dst, cfg):
 
     if not pending:
         log(f"[{name}] All done!")
-        if os.path.exists(pf):
-            os.remove(pf)
+        # Keep progress file for watch mode
+        last_id = max(m.id for m, _ in items) if items else last_id
+        save()
         return
 
     for idx, (msg, cap) in enumerate(pending):
@@ -820,14 +822,90 @@ async def run_one_source(client, dst, cfg, dry=False):
         log(f"[{cfg['name']}] Marked complete.")
 
 
+async def process_single_message(client, dst, link, method):
+    """处理单条消息：下载上传 或 转发"""
+    import tempfile as _tmp
+    log(f"[Single] {link} method={method}")
+
+    # Parse link: https://t.me/c/CHAT_ID/MSG_ID or https://t.me/USERNAME/MSG_ID
+    m = re.search(r"t\.me/(?:c/)?(-?\d+)/(\d+)|t\.me/([^/]+)/(\d+)", link)
+    if not m:
+        log("[Single] Invalid link: {}".format(link))
+        return
+
+    if m.group(1):
+        src_id = int(m.group(1))
+        msg_id = int(m.group(2))
+    else:
+        src_id = m.group(3)
+        msg_id = int(m.group(4))
+
+    try:
+        src = await client.get_chat(src_id)
+        msg = await client.get_messages(src.id, msg_id)
+        if not msg:
+            log("[Single] Message not found")
+            return
+
+        caption = msg.caption or ""
+        log("[Single] Source: {} msg={} caption={}".format(src.title or src_id, msg_id, caption[:60]))
+
+        if method == "forward":
+            sent = await client.forward_messages(dst.id, src.id, msg_id)
+            if sent:
+                fid = get_msg_fid(sent)
+                if fid:
+                    record_forward(fid, sent.id, str(src_id), get_msg_meta(sent))
+                log("[Single] Forwarded OK -> TGdown {}".format(getattr(sent, 'id', '?')))
+        elif method == "upload":
+            if not msg.video and not msg.document:
+                log("[Single] No video/document to upload")
+                return
+            tmp_path = os.path.join("/tmp", "tg_upload_{}.mp4".format(msg_id))
+            log("[Single] Downloading...")
+            await client.download_media(msg, file_name=tmp_path)
+            log("[Single] Uploading...")
+            if msg.video:
+                v = msg.video
+                sent = await client.send_video(dst.id, tmp_path, caption=caption,
+                                                width=getattr(v, 'width', 0), height=getattr(v, 'height', 0),
+                                                duration=getattr(v, 'duration', 0),
+                                                supports_streaming=True, progress=None)
+            else:
+                sent = await client.send_document(dst.id, tmp_path, caption=caption)
+            if sent:
+                fid = get_msg_fid(sent) or get_msg_fid(msg)
+                if fid:
+                    record_forward(fid, sent.id, str(src_id), get_msg_meta(msg) or get_msg_meta(sent))
+                log("[Single] Uploaded OK -> TGdown {}".format(getattr(sent, 'id', '?')))
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
+    except Exception as e:
+        log("[Single] ERROR: {}".format(e))
+
+
 async def main():
     dry_run = "--dry" in sys.argv
     once_mode = "--once" in sys.argv
     watch_mode = "--watch" in sys.argv
+    single_mode = "--single" in sys.argv
     target = None
     for a in sys.argv:
         if a.startswith("--group="):
             target = a.split("=", 1)[1]
+
+    # --single <message_link> --method upload|forward
+    # 直接处理单条消息的下载上传或转发
+    single_link = None
+    single_method = "upload"
+    if single_mode:
+        for i, a in enumerate(sys.argv):
+            if a == "--single" and i + 1 < len(sys.argv):
+                single_link = sys.argv[i + 1]
+            if a == "--method" and i + 1 < len(sys.argv):
+                single_method = sys.argv[i + 1]
 
     client = Client(SESSION, api_id=API_ID, api_hash=API_HASH, proxy=PROXY)
     await client.start()
@@ -835,6 +913,12 @@ async def main():
     log(f"Login: {me.first_name}")
     dst = await client.get_chat(DEST)
     log(f"Dest: {dst.title}")
+
+    # === Single message mode ===
+    if single_mode and single_link:
+        await process_single_message(client, dst, single_link, single_method)
+        await client.stop()
+        return
 
     sources = load_sources()
     if not sources:

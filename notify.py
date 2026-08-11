@@ -42,24 +42,16 @@ def send_message(token, chat_id, text):
 
 
 def collect_daily_stats():
-    """统计今日转发数据"""
-    today = time.strftime("%Y-%m-%d")
-    stats = {"forwarded": 0, "skipped": 0, "errors": 0, "dup_hard": 0, "dup_soft": 0}
+    """统计当前数据（基于持久化文件，准确可靠）"""
+    stats = {
+        "unique_files": 0,
+        "downloaded": 0,
+        "pending_uploads": 0,
+        "pending_forwards": 0,
+        "watch_groups": 0,
+    }
 
-    # 从各群进度文件汇总
-    if os.path.exists(SDIR):
-        for fname in os.listdir(SDIR):
-            if fname.startswith("fwd_") and fname.endswith(".json"):
-                try:
-                    with open(os.path.join(SDIR, fname)) as f:
-                        p = json.load(f)
-                    stats["forwarded"] += p.get("forwarded", 0)
-                    stats["skipped"] += p.get("skipped", 0)
-                    stats["errors"] += p.get("errors", 0)
-                except:
-                    pass
-
-    # 去重统计
+    # 去重文件数（forwarded_log 记录的是 file_unique_id → 转发信息）
     fwd_log = os.path.join(SDIR, "forwarded_log.json")
     if os.path.exists(fwd_log):
         try:
@@ -69,12 +61,34 @@ def collect_daily_stats():
         except:
             pass
 
-    # 下载统计
+    # 下载计数
     dedup_file = os.path.join(SDIR, "downloaded_ids.txt")
     if os.path.exists(dedup_file):
         try:
             with open(dedup_file) as f:
                 stats["downloaded"] = sum(1 for _ in f)
+        except:
+            pass
+
+    # 待处理任务
+    src_cfg = os.path.join(SDIR, "sources_config.json")
+    if os.path.exists(src_cfg):
+        try:
+            with open(src_cfg) as f:
+                sources = json.load(f)
+            seen = set()
+            for s in sources:
+                if not s.get("enabled"):
+                    continue
+                if s.get("mode") == "watch":
+                    stats["watch_groups"] += 1
+                elif s.get("method") == "upload" and not s.get("complete"):
+                    key = (s.get("source"), s.get("name"))
+                    if key not in seen:
+                        seen.add(key)
+                        stats["pending_uploads"] += 1
+                elif s.get("method") == "forward" and s.get("mode") == "once" and not s.get("complete"):
+                    stats["pending_forwards"] += 1
         except:
             pass
 
@@ -91,11 +105,11 @@ def send_daily_report():
     msg = (
         f"<b>📊 TG Portal 每日报告</b>\n"
         f"📅 {time.strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"📤 今日转发: <b>{stats['forwarded']}</b>\n"
-        f"⏭️ 跳过: {stats['skipped']}\n"
-        f"❌ 错误: {stats['errors']}\n"
-        f"🔗 去重文件: {stats.get('unique_files', 0)}\n"
-        f"📥 累计下载: {stats.get('downloaded', 0)}"
+        f"📤 已转发去重文件: <b>{stats.get('unique_files', 0)}</b>\n"
+        f"📥 累计下载: {stats.get('downloaded', 0)}\n"
+        f"👀 监控群组: {stats.get('watch_groups', 0)}\n"
+        f"⏳ 待上传: {stats.get('pending_uploads', 0)}\n"
+        f"📋 待转发: {stats.get('pending_forwards', 0)}"
     )
     return send_message(cfg["token"], cfg["chat_id"], msg)
 
