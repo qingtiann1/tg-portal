@@ -99,9 +99,28 @@ tg-portal/
 `forward_messages([id1, id2, ...])` 传多 ID 可保持相册关系。
 引擎会自动检测 `media_group_id`，将同组消息批量转发。
 
-## 部署
+## 部署 / Deployment
 
-### Docker Compose
+### 换 NAS / 新机部署（3步）
+
+```bash
+# 1. 克隆项目，复制到 NAS
+git clone https://github.com/qingtiann1/tg-portal.git
+scp tg-portal/*.py tg-portal/*.html nas:/vol1/1000/docker/tg-downloader/sessions/
+
+# 2. 安装 alist（115 上传依赖）
+curl -L -o /tmp/alist.tar.gz https://github.com/AlistGo/alist/releases/download/v3.43.0/alist-linux-amd64.tar.gz
+tar xzf /tmp/alist.tar.gz -C /tmp
+cp /tmp/alist /usr/local/bin/alist
+# 配置 115：在 alist Web UI (http://NAS:5244) 添加 115 存储
+
+# 3. 启动
+docker exec -d tg-downloader python3 /app/sessions/scheduler.py
+```
+
+scheduler.py 会自动启动 Bot + 转发引擎 + upload 队列。一个脚本管理所有。
+
+### Docker Compose（最小配置）
 
 ```yaml
 tg-downloader:
@@ -113,16 +132,7 @@ tg-downloader:
     - ./patch_index.html:/app/module/templates/index.html
 ```
 
-### 启动
-
-```bash
-# 调度器（自动管理所有任务）
-docker exec -d tg-downloader python3 /app/sessions/scheduler.py
-
-# Bot
-docker exec -d tg-downloader python3 /app/sessions/tg_bot.py
-
-# 手动任务
+### 手动命令
 docker exec tg-downloader python3 /app/sessions/forward_engine.py --watch <group>
 docker exec tg-downloader python3 /app/sessions/forward_engine.py --single <link> --method upload
 ```

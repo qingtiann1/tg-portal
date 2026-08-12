@@ -201,12 +201,12 @@ def handle_stats(chat_id):
     from notify import collect_daily_stats
     s = collect_daily_stats()
     send_message(chat_id,
-        f"<b>📊 实时统计</b>\n\n"
-        f"📤 累计转发: <b>{s['forwarded']}</b>\n"
-        f"⏭️ 跳过: {s['skipped']}\n"
-        f"❌ 错误: {s['errors']}\n"
-        f"🔗 去重文件: {s.get('unique_files', 0)}\n"
-        f"📥 累计下载: {s.get('downloaded', 0)}")
+        f"<b>📊 TG Portal 统计</b>\n\n"
+        f"📤 去重转发文件: <b>{s.get('unique_files', 0)}</b>\n"
+        f"📥 累计下载: {s.get('downloaded', 0)}\n"
+        f"👀 监控群组: {s.get('watch_groups', 0)}\n"
+        f"⏳ 待上传: {s.get('pending_uploads', 0)}\n"
+        f"📋 待转发: {s.get('pending_forwards', 0)}")
 
 
 def handle_list(chat_id):
@@ -281,10 +281,15 @@ def handle_callback(callback_id, chat_id, msg_id, data):
             })
             save_json(SRC_CFG, sources)
             clear_state(chat_id)
+            method_text = "🔄 转存" if method == "forward" else "⬇️ 下载上传"
+            if method == "upload":
+                time_note = "\n⏰ 将在每日 02:05-16:00 自动处理"
+            else:
+                time_note = ""
             edit_message(chat_id, msg_id,
-                f"✅ 已添加单条消息转发\n"
-                f"群组: {chat_name}\n消息: {message_id}\n方式: {method}\n\n"
-                f"运行: docker exec tg-login python /sessions/forward_engine.py --once")
+                f"✅ 已添加单条消息 ({method_text})\n"
+                f"📌 群组: {chat_name}\n"
+                f"📨 消息ID: {message_id}{time_note}")
         return
 
     # 群组链接流程
@@ -346,12 +351,19 @@ def finalize_source(chat_id, msg_id):
     mode_text = f"👁️ 持续监控 (每{interval}h)" if mode == "watch" else "📦 一次性转存"
     method_text = "🔄 可转存" if method == "forward" else "⬇️ 需下载上传"
 
+    if mode == "watch":
+        status_note = "👁️ 自动监控运行中 (16:00-02:00)"
+    elif method == "upload":
+        status_note = "⏰ 将在每日 02:05-16:00 自动下载上传"
+    else:
+        status_note = "📤 将在下一次转发周期自动处理"
+
     edit_message(chat_id, msg_id,
         f"<b>✅ 添加成功!</b> #{total}\n\n"
         f"群组: <code>{group_id}</code>\n"
         f"方式: {method_text}\n"
         f"模式: {mode_text}{queue_info}\n\n"
-        f"{'👁️ 自动监控运行中...' if mode == 'watch' else '💡 运行引擎: /sessions/forward_engine.py --once'}")
+        f"{status_note}")
 
 
 # ============================================================
